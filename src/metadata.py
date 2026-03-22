@@ -1,0 +1,97 @@
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+from pydantic import BaseModel
+
+
+class ArticleMetadata(BaseModel):
+    summary_ru: str
+    tags: List[str]
+    author: Optional[str] = None
+    verification_notes: str
+    step_by_step_guidance: str = ""
+
+
+def build_props(
+    title: str,
+    url: str,
+    res: ArticleMetadata,
+    source: Optional[str] = None,
+    journal_day: Optional[str] = None,
+) -> str:
+    lines = [f"title:: {title}", f"alias:: {title}"]
+
+    if res.tags:
+        lines.append(f"tags:: {' '.join(f'[[{t}]]' for t in res.tags)}")
+
+    now = datetime.now().strftime("%Y-%m-%d")
+    if not journal_day:
+        journal_day = now
+
+    lines.extend(
+        [
+            "type:: article",
+            f"journal-day:: [[{journal_day}]]",
+            "status:: processed",
+            f"processed:: {now}",
+            f"created:: {now}",
+            f"url:: {url}",
+        ]
+    )
+
+    if source:
+        lines.append(f"source:: [[{source.strip()}]]")
+
+    if res.author:
+        lines.append(f"author:: {res.author}")
+
+    return "\n".join(lines) + "\n\n"
+
+
+def build_content(
+    title: str,
+    url: str,
+    metadata: ArticleMetadata,
+    extracted_text: str,
+    is_youtube: bool = False,
+) -> str:
+    source = "youtube" if is_youtube else None
+    props = build_props(title, url, metadata, source=source)
+
+    source_label = " (по видео)" if is_youtube else ""
+    config = metadata.__class__
+    from .common import Config
+
+    cfg = Config.get()
+    max_len = cfg.content_max_length
+
+    text_preview = (
+        extracted_text.strip()
+        if len(extracted_text) < max_len
+        else extracted_text[:max_len] + "\n... (полный текст ниже)"
+    )
+
+    content = f"""{props}
+**Summary**
+{metadata.summary_ru.strip()}
+
+**Шаг за шагом руководство**{source_label}
+{metadata.step_by_step_guidance}
+
+**Достоверность**
+{metadata.verification_notes.strip()}
+
+---
+{text_preview}
+"""
+    return content
+
+
+def create_fallback_metadata(url: str) -> ArticleMetadata:
+    return ArticleMetadata(
+        summary_ru=f"Ссылка: {url}\n(LLM не справился)",
+        tags=["tabs-import"],
+        verification_notes="Fallback",
+        step_by_step_guidance="(не удалось извлечь)",
+    )

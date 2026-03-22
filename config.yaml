@@ -1,0 +1,34 @@
+model: qwen3.5:9b
+default_delay_seconds: 2
+max_retries: 3
+warmup_llm: true
+
+watch_folder: ~/Nextcloud/Notes
+
+rate_limit:
+  delay_per_domain: 2
+  delay_global: 1
+
+content:
+  min_length: 100
+  max_length: 8000
+
+llm:
+  timeout_seconds: 120
+  temperature_attempts:
+    - 0.05
+    - 0.25
+    - 0.50
+
+folders:
+  articles: articles
+  processed: processed
+  originals: originals
+  errors: errors
+  other: Other
+
+logging:
+  level: INFO
+  folder: ~/.logseq-processor/logs
+  retention_days: 7
+  console: true
