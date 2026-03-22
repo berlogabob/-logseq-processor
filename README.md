@@ -20,7 +20,8 @@ uv run logseq-processor [path] [--model MODEL] [--force] [--debug]
 ### Worker modes (pipeline split)
 
 ```bash
-# Full legacy behavior (fetch + summarize in one flow)
+# Full default behavior (parallel branches in one process):
+# FILE/QUEUE ingest + LLM worker run together
 uv run logseq-processor [path] --worker all
 
 # Ingestion only (watch files, parse links, expand short URLs, fetch/extract, queue LLM jobs)
@@ -29,6 +30,8 @@ uv run logseq-processor [path] --worker ingest
 # LLM only (consume queued jobs and produce final Logseq notes)
 uv run logseq-processor [path] --worker llm
 ```
+
+`--worker all` now runs ingest and LLM branches concurrently, so file handling and summarization progress in parallel.
 
 LLM worker parallelism is configurable via `config.yaml`:
 
@@ -66,3 +69,13 @@ Edit `config.yaml` to customize settings.
   - HTML fallback (`canonical`, `og:url`, meta refresh, simple JS redirects)
 - Unsafe/local targets are rejected (`localhost`, private/loopback/link-local IP ranges).
 - Canonical resolved URL is used for dedupe and saved as `url::` in generated notes.
+
+## Why some one-line link files go to `errors`
+
+A one-line file with a valid URL can still fail if the target site blocks or hides content:
+
+- HTTP access blocked (`403`, `429`, auth-required pages)
+- SSL certificate validation failure
+- JS-heavy / app-style pages where static extraction returns no readable article text
+
+This is expected for some domains and does not necessarily indicate malformed input files.
