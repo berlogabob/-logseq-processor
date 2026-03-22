@@ -13,8 +13,13 @@ content:
   min_length: 100
   max_length: 8000
 
+http:
+  retry_429_count: 3
+  retry_429_backoff_seconds: 1.0
+
 llm:
   timeout_seconds: 120
+  max_parallel_jobs: 1
   temperature_attempts:
     - 0.05
     - 0.25
@@ -32,3 +37,4 @@ logging:
   folder: ~/.logseq-processor/logs
   retention_days: 7
   console: true
+  queue_heartbeat_seconds: 10

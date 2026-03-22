@@ -20,7 +20,7 @@ def build_props(
     source: Optional[str] = None,
     journal_day: Optional[str] = None,
 ) -> str:
-    lines = [f"title:: {title}", f"alias:: {title}"]
+    lines = [f"title:: {title}"]
 
     if res.tags:
         lines.append(f"tags:: {' '.join(f'[[{t}]]' for t in res.tags)}")
@@ -72,13 +72,21 @@ def build_content(
         else extracted_text[:max_len] + "\n... (полный текст ниже)"
     )
 
+    guidance = (metadata.step_by_step_guidance or "").strip()
+    show_guidance = bool(guidance and guidance != "(не удалось извлечь)")
+
+    guidance_block = ""
+    if show_guidance:
+        guidance_block = f"""
+**Шаг за шагом руководство**{source_label}
+{guidance}
+"""
+
     content = f"""{props}
 **Summary**
 {metadata.summary_ru.strip()}
 
-**Шаг за шагом руководство**{source_label}
-{metadata.step_by_step_guidance}
-
+{guidance_block}
 **Достоверность**
 {metadata.verification_notes.strip()}
 

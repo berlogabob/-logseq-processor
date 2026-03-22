@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from .metadata import ArticleMetadata
 from .utils import clean_json
-from .common import Config, logger
+from .common import Config, logger, log_stage
 
 
 def get_article_metadata(
@@ -34,7 +34,9 @@ def get_article_metadata(
 
     config = Config.get()
 
-    for attempt in range(1, 4):
+    attempts_total = max(1, int(config.max_retries))
+
+    for attempt in range(1, attempts_total + 1):
         temp = (
             config.llm_temperature_attempts[attempt - 1]
             if attempt - 1 < len(config.llm_temperature_attempts)
@@ -62,18 +64,23 @@ def get_article_metadata(
 
         thread = threading.Thread(target=call_llm, daemon=True)
         thread.start()
+        log_stage("LLM", f"attempt {attempt}/{attempts_total} (temp={temp:.2f})")
         thread.join(timeout=config.llm_timeout_seconds)
 
         if thread.is_alive():
             logger.warning(
-                "Attempt %d/3 — TimeoutError: LLM call exceeded %d seconds",
+                "Attempt %d/%d — TimeoutError: LLM call exceeded %d seconds",
                 attempt,
+                attempts_total,
                 config.llm_timeout_seconds,
             )
-            continue
+            logger.error(
+                "LLM timeout detected; aborting retries to avoid stacking stuck calls"
+            )
+            break
 
         if error[0]:
-            logger.warning("Attempt %d/3 — %s", attempt, error[0])
+            logger.warning("Attempt %d/%d — %s", attempt, attempts_total, error[0])
             continue
 
         if result[0]:

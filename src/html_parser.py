@@ -1,3 +1,4 @@
+import time
 from typing import Optional
 
 import requests
@@ -29,14 +30,34 @@ def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
         logger.warning("Trafilatura failed: %s. Using requests...", e)
 
     try:
-        response = _session.get(url, timeout=timeout)
-        response.raise_for_status()
-        content = response.text
-        if len(content) > MAX_CONTENT_SIZE:
-            logger.warning("Content truncated (%d bytes)", len(content))
-            content = content[:MAX_CONTENT_SIZE]
-        logger.info("Fetched via requests: %s", url[:80])
-        return content
+        config = Config.get()
+        retry_count = max(0, int(config.http_retry_429_count))
+        base_backoff = max(0.0, float(config.http_retry_429_backoff_seconds))
+        max_attempts = retry_count + 1
+
+        for attempt in range(max_attempts):
+            response = _session.get(url, timeout=timeout)
+            if response.status_code == 429 and attempt < max_attempts - 1:
+                backoff = base_backoff * (2**attempt)
+                logger.warning(
+                    "HTTP 429 for %s (attempt %d/%d), retrying in %.2fs",
+                    url[:80],
+                    attempt + 1,
+                    max_attempts,
+                    backoff,
+                )
+                response.close()
+                if backoff > 0:
+                    time.sleep(backoff)
+                continue
+
+            response.raise_for_status()
+            content = response.text
+            if len(content) > MAX_CONTENT_SIZE:
+                logger.warning("Content truncated (%d bytes)", len(content))
+                content = content[:MAX_CONTENT_SIZE]
+            logger.info("Fetched via requests: %s", url[:80])
+            return content
     except requests.RequestException as e:
         logger.error("Requests failed: %s", e)
         return None

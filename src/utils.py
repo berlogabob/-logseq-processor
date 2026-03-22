@@ -1,11 +1,14 @@
 import re
 import shutil
+import socket
 import time
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
-from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from .common import Config, ProcessingError, log_info, logger
 
@@ -164,26 +167,176 @@ def clean_json(raw: str) -> str:
     return raw[start:end] if start >= 0 and end > start else "{}"
 
 
-def expand_url(url: str, timeout: int = 10, max_redirects: int = 5) -> Optional[str]:
+_WRAPPER_PARAM_KEYS = {"url", "u", "target", "redirect", "dest", "to"}
+_JS_REDIRECT_PATTERNS = [
+    r"""window\.location(?:\.href)?\s*=\s*["']([^"']+)["']""",
+    r"""location\.replace\(\s*["']([^"']+)["']\s*\)""",
+    r"""location\.assign\(\s*["']([^"']+)["']\s*\)""",
+]
+
+
+def _is_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _is_private_or_local_ip(ip_str: str) -> bool:
+    try:
+        ip_obj = ip_address(ip_str.split("%", 1)[0])
+    except ValueError:
+        return False
+    return (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_unspecified
+    )
+
+
+def _hostname_resolves_to_private(hostname: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+    except OSError:
+        return False
+
+    for info in infos:
+        addr = info[4][0]
+        if _is_private_or_local_ip(addr):
+            return True
+    return False
+
+
+def _is_safe_public_http_url(url: str) -> bool:
+    if not _is_http_url(url):
+        return False
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").strip().strip("[]").lower()
+    if not hostname:
+        return False
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return False
+    if _is_private_or_local_ip(hostname):
+        return False
+    if _hostname_resolves_to_private(hostname):
+        return False
+    return True
+
+
+def _extract_query_wrapped_url(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=False)
+    for key in _WRAPPER_PARAM_KEYS:
+        values = query.get(key)
+        if not values:
+            continue
+        for value in values:
+            candidate = value.strip()
+            for _ in range(2):
+                candidate = unquote(candidate).strip()
+            if _is_safe_public_http_url(candidate):
+                return candidate
+    return None
+
+
+def _is_likely_wrapper_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if any(k in _WRAPPER_PARAM_KEYS for k in parse_qs(parsed.query).keys()):
+        return True
+    path = parsed.path.lower()
+    return any(marker in path for marker in ("/redirect", "/out", "/link"))
+
+
+def _extract_html_fallback_url(html: str, base_url: str) -> Optional[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+
+    canonical = soup.find("link", rel=lambda v: v and "canonical" in v)
+    if canonical and canonical.get("href"):
+        candidates.append(canonical.get("href", "").strip())
+
+    og_url = soup.find("meta", attrs={"property": "og:url"})
+    if og_url and og_url.get("content"):
+        candidates.append(og_url.get("content", "").strip())
+
+    refresh_meta = soup.find("meta", attrs={"http-equiv": re.compile(r"refresh", re.I)})
+    if refresh_meta and refresh_meta.get("content"):
+        match = re.search(r"url\s*=\s*([^;]+)$", refresh_meta["content"], flags=re.I)
+        if match:
+            candidates.append(match.group(1).strip().strip("\"'"))
+
+    for pattern in _JS_REDIRECT_PATTERNS:
+        match = re.search(pattern, html, flags=re.I)
+        if match:
+            candidates.append(match.group(1).strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        absolute = urljoin(base_url, candidate)
+        if _is_safe_public_http_url(absolute):
+            return absolute
+    return None
+
+
+def resolve_url(url: str, timeout: int = 10, max_redirects: int = 5) -> Optional[str]:
     if not url:
         return None
-    current = url
+
     session = requests.Session()
-    session.max_redirects = max_redirects
-
     try:
-        resp = session.head(current, allow_redirects=True, timeout=timeout)
-        if resp.url:
-            current = resp.url
-    except requests.RequestException:
-        try:
-            resp = session.get(current, allow_redirects=True, timeout=timeout, stream=True)
-            if resp.url:
-                current = resp.url
-            resp.close()
-        except requests.RequestException:
-            return None
+        session.max_redirects = max_redirects
+        current = url
+        response = None
 
-    if not current.startswith(("http://", "https://")):
-        return None
-    return current
+        try:
+            head_resp = session.head(current, allow_redirects=True, timeout=timeout)
+            if head_resp.url:
+                current = head_resp.url
+        except requests.RequestException:
+            try:
+                response = session.get(
+                    current, allow_redirects=True, timeout=timeout, stream=True
+                )
+                if response.url:
+                    current = response.url
+            except requests.RequestException:
+                return None
+
+        wrapped = _extract_query_wrapped_url(current)
+        if wrapped:
+            if response is not None:
+                response.close()
+            return wrapped
+
+        if _is_likely_wrapper_url(current):
+            try:
+                if response is None:
+                    response = session.get(
+                        current, allow_redirects=True, timeout=timeout, stream=True
+                    )
+                html = response.text
+                meta_target = _extract_html_fallback_url(html, current)
+                if meta_target:
+                    return meta_target
+            except Exception:
+                pass
+            finally:
+                if response is not None:
+                    response.close()
+                    response = None
+
+        if response is not None:
+            response.close()
+
+        if not _is_safe_public_http_url(current):
+            return None
+        return current
+    finally:
+        session.close()
+
+
+def expand_url(url: str, timeout: int = 10, max_redirects: int = 5) -> Optional[str]:
+    return resolve_url(url, timeout=timeout, max_redirects=max_redirects)

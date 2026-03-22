@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import concurrent.futures
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ from .common import (
     get_timestamp,
     log_error,
     log_print,
+    log_stage,
     logger,
     warmup_llm,
 )
@@ -235,43 +238,41 @@ def process_single_file(
             )
             return
 
-        if non_empty <= 2:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-            url = extract_url_from_text(content)
-            if not url:
-                log_print(f"No URL found: {path.name}")
-                move_to_folder(
-                    path,
-                    config.get_errors_folder(),
-                    get_error_suffix(ProcessingError.NO_URL_FOUND),
-                )
-                return
-
-            domain = get_domain(url)
-            log_print(f"Processing: {path.name} ({domain})")
-            start_time = time.time()
-
-            success = False
-            error = ProcessingError.UNKNOWN
-            if worker_mode == "all":
-                success, error = process_article(url, path.stem, model)
-            else:
-                if not pipeline:
-                    raise RuntimeError("Pipeline queue is required in worker mode")
-                success = pipeline.enqueue(url, path.stem, source_file=path.name)
-                if not success:
-                    error = ProcessingError.UNKNOWN
-
-            elapsed = time.time() - start_time
-            if success:
-                log_print(f"✓ {path.name} ({elapsed:.1f}s)")
-                move_to_folder(path, config.get_originals_folder())
-            else:
-                log_print(f"✗ {path.name} - {error.value}")
-                move_to_folder(path, config.get_errors_folder(), get_error_suffix(error))
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        url = extract_url_from_text(content)
+        if not url:
+            log_print(f"No URL found: {path.name}")
+            move_to_folder(
+                path,
+                config.get_errors_folder(),
+                get_error_suffix(ProcessingError.NO_URL_FOUND),
+            )
             return
 
-        log_print(f"Skipping (long): {path.name}", "→")
+        domain = get_domain(url)
+        log_print(f"Processing: {path.name} ({domain})")
+        start_time = time.time()
+
+        success = False
+        error = ProcessingError.UNKNOWN
+        if worker_mode == "all":
+            success, error = process_article(url, path.stem, model)
+        else:
+            if not pipeline:
+                raise RuntimeError("Pipeline queue is required in worker mode")
+            success = pipeline.enqueue(url, path.stem, source_file=path.name)
+            if not success:
+                error = ProcessingError.UNKNOWN
+            else:
+                log_stage("QUEUE", f"enqueued ingest: {path.name}")
+
+        elapsed = time.time() - start_time
+        if success:
+            log_print(f"✓ {path.name} ({elapsed:.1f}s)")
+            move_to_folder(path, config.get_originals_folder())
+        else:
+            log_print(f"✗ {path.name} - {error.value}")
+            move_to_folder(path, config.get_errors_folder(), get_error_suffix(error))
         return
 
     if name_lower.endswith(".html"):
@@ -425,6 +426,51 @@ class WatchHandler(FileSystemEventHandler):
                 self.recently_processed[str(event.dest_path)] = time.time()
 
 
+class QueueHeartbeat:
+    def __init__(self, interval_seconds: float):
+        self.pipeline = PipelineQueue()
+        self.interval_seconds = max(1.0, interval_seconds)
+        self._last_snapshot: tuple[int, int, int, int, int] | None = None
+        self._was_active = False
+
+    def _snapshot(self) -> tuple[int, int, int, int, int]:
+        stats = self.pipeline.get_stats()
+        return (
+            stats.get("queued_ingest", 0),
+            stats.get("queued_llm", 0),
+            stats.get("llm_done", 0),
+            stats.get("llm_failed", 0),
+            stats.get("ingest_failed", 0),
+        )
+
+    def run(self):
+        log_stage(
+            "QUEUE",
+            f"heartbeat started (every {self.interval_seconds:.1f}s)",
+        )
+        while True:
+            queued_ingest, queued_llm, llm_done, llm_failed, ingest_failed = self._snapshot()
+            snapshot = (queued_ingest, queued_llm, llm_done, llm_failed, ingest_failed)
+            has_active_work = queued_ingest > 0 or queued_llm > 0
+            just_became_idle = self._was_active and not has_active_work
+            should_log = has_active_work or just_became_idle
+            if should_log:
+                log_stage(
+                    "QUEUE",
+                    (
+                        "heartbeat "
+                        f"queued_ingest={queued_ingest} "
+                        f"queued_llm={queued_llm} "
+                        f"llm_done={llm_done} "
+                        f"llm_failed={llm_failed} "
+                        f"ingest_failed={ingest_failed}"
+                    ),
+                )
+            self._last_snapshot = snapshot
+            self._was_active = has_active_work
+            time.sleep(self.interval_seconds)
+
+
 def watch_folder(
     folder: Path,
     model: str,
@@ -451,35 +497,96 @@ def watch_folder(
 
 def run_llm_worker(model: str, interval: float = 2.0):
     pipeline = PipelineQueue()
-    log_print("Starting LLM worker", "🤖")
+    max_parallel_jobs = Config.get().llm_max_parallel_jobs
+    log_stage("LLM", "worker started")
     while True:
-        jobs = pipeline.get_jobs("queued_llm", limit=10)
+        jobs = pipeline.claim_jobs(
+            from_status="queued_llm",
+            to_status="processing_llm",
+            limit=max_parallel_jobs,
+        )
+        if not jobs:
+            time.sleep(interval)
+            continue
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_parallel_jobs
+        ) as executor:
+            futures = {}
+            for job in jobs:
+                log_stage("LLM", f"start summarize: #{job['id']} {job['title'][:60]}")
+                future = executor.submit(
+                    finalize_article,
+                    title=job["title"],
+                    expanded_url=job["url_expanded"] or job["url_original"],
+                    normalized_url=job["url_normalized"] or "",
+                    extracted_text=job["extracted_text"] or "",
+                    is_yt=bool(job["is_youtube"]),
+                    source=get_domain(job["url_expanded"] or job["url_original"]),
+                    model=model,
+                )
+                futures[future] = job
+            for future in concurrent.futures.as_completed(futures):
+                job = futures[future]
+                try:
+                    ok, err, out_path = future.result()
+                except Exception:
+                    ok, err, out_path = False, ProcessingError.UNKNOWN, None
+                if ok:
+                    pipeline.mark_llm_done(job["id"], str(out_path) if out_path else "")
+                    log_stage("LLM", f"done summarize: #{job['id']}")
+                else:
+                    pipeline.mark_llm_failed(
+                        job["id"], err.value, str(out_path) if out_path else None
+                    )
+                    log_stage("LLM", f"failed summarize: #{job['id']} ({err.value})")
+
+
+def run_ingest_pipeline_worker(interval: float = 1.0):
+    pipeline = PipelineQueue()
+    log_stage("QUEUE", "ingest pipeline worker started")
+    while True:
+        jobs = pipeline.claim_jobs(
+            from_status="queued_ingest",
+            to_status="processing_ingest",
+            limit=20,
+        )
         if not jobs:
             time.sleep(interval)
             continue
 
         for job in jobs:
-            ok, err, out_path = finalize_article(
-                title=job["title"],
-                expanded_url=job["url_expanded"] or job["url_original"],
-                normalized_url=job["url_normalized"] or "",
-                extracted_text=job["extracted_text"] or "",
-                is_yt=bool(job["is_youtube"]),
-                source=get_domain(job["url_expanded"] or job["url_original"]),
-                model=model,
-            )
-            if ok:
-                pipeline.mark_llm_done(job["id"], str(out_path) if out_path else "")
-            else:
-                pipeline.mark_llm_failed(
-                    job["id"], err.value, str(out_path) if out_path else None
+            log_stage("FILE", f"start ingest: #{job['id']} {job['title'][:60]}")
+            ingest, err = ingest_article(job["url_original"], job["title"], force=False)
+            if ingest:
+                pipeline.mark_ingested(
+                    job["id"],
+                    expanded_url=ingest["expanded_url"],
+                    normalized_url=ingest["normalized_url"],
+                    extracted_text=ingest["extracted_text"],
+                    is_youtube=ingest["is_youtube"],
                 )
+                log_stage("QUEUE", f"queued llm: #{job['id']}")
+                continue
+
+            if err == ProcessingError.UNKNOWN:
+                pipeline.mark_skipped(job["id"], "already_processed")
+                log_stage("QUEUE", f"skipped (already processed): #{job['id']}")
+            else:
+                pipeline.mark_ingest_failed(job["id"], err.value)
+                log_stage("FILE", f"ingest failed: #{job['id']} ({err.value})")
 
 
-def run_ingest_worker(folder: Path, model: str):
+def run_ingest_worker(folder: Path, model: str, start_llm_thread: bool = False):
+    config = Config.get()
     pipeline = PipelineQueue()
     queue = QueueManager()
-    log_print("Starting ingest worker", "📥")
+    log_stage("FILE", "watch/enqueue worker started")
+    heartbeat_thread = threading.Thread(
+        target=QueueHeartbeat(config.queue_heartbeat_seconds).run,
+        daemon=True,
+    )
+    heartbeat_thread.start()
     log_print(f"Model: {model} | Folder: {folder}", "⚙️")
     log_print("Scanning folder...", "📋")
     stats = scan_folder(folder, model, queue, pipeline=pipeline, worker_mode="ingest")
@@ -488,6 +595,18 @@ def run_ingest_worker(folder: Path, model: str):
     log_print(f"  .html files: {stats['.html']}")
     log_print(f"  tabs files: {stats['tabs']}")
     log_print(f"  other files: {stats['other']}")
+    worker_thread = threading.Thread(
+        target=run_ingest_pipeline_worker, kwargs={"interval": 0.5}, daemon=True
+    )
+    worker_thread.start()
+
+    if start_llm_thread:
+        llm_thread = threading.Thread(
+            target=run_llm_worker, kwargs={"model": model, "interval": 1.0}, daemon=True
+        )
+        llm_thread.start()
+        log_stage("SYSTEM", "all-mode parallel: FILE/QUEUE + LLM workers started")
+
     watch_folder(folder, model, queue, pipeline=pipeline, worker_mode="ingest")
 
 
@@ -528,29 +647,10 @@ def main():
         run_ingest_worker(folder, args.model)
         return
 
-    queue = QueueManager()
-    active = queue.get_active_queue()
-    if active:
-        total, completed, errors = queue.get_stats()
-        log_print(f"Resuming queue: {active['source_file']}", "⚠️")
-        log_print(f"Progress: {completed}/{total} ({errors} errors)", "📊")
-
-    log_print("Scanning folder...", "📋")
-    stats = scan_folder(folder, args.model, queue, pipeline=None, worker_mode="all")
-
-    total_urls = 0
-    active = queue.get_active_queue()
-    if active:
-        total_urls = active["total"]
-    if total_urls > 0:
-        log_print(f"Queue: {total_urls} links pending", "📋")
-
-    log_print("Summary", "📊")
-    log_print(f"  .md files: {stats['.md']}")
-    log_print(f"  .html files: {stats['.html']}")
-    log_print(f"  tabs files: {stats['tabs']}")
-    log_print(f"  other files: {stats['other']}")
-    watch_folder(folder, args.model, queue, pipeline=None, worker_mode="all")
+    # In all mode, run both branches in parallel inside one process:
+    # - FILE/QUEUE branch: watch + enqueue + ingest extraction
+    # - LLM branch: summarize queued_llm jobs
+    run_ingest_worker(folder, args.model, start_llm_thread=True)
 
 
 if __name__ == "__main__":

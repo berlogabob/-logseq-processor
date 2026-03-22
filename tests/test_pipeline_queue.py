@@ -45,6 +45,19 @@ class PipelineQueueTests(unittest.TestCase):
                                 extracted_text="text",
                                 is_youtube=False,
                             )
+                        elif status == "processing_llm":
+                            queue.mark_ingested(
+                                job_id=job_id,
+                                expanded_url="https://example.com/article",
+                                normalized_url="https://example.com/article",
+                                extracted_text="text",
+                                is_youtube=False,
+                            )
+                            queue.claim_jobs(
+                                from_status="queued_llm",
+                                to_status="processing_llm",
+                                limit=1,
+                            )
                         elif status == "llm_done":
                             queue.mark_ingested(
                                 job_id=job_id,
@@ -128,6 +141,55 @@ class PipelineQueueTests(unittest.TestCase):
         self.assertEqual(updated["attempts_llm"], 1)
         self.assertEqual(updated["out_path"], "/tmp/partial.md")
         self.assertEqual(updated["error"], "llm error")
+
+    def test_claim_jobs_ignores_non_positive_limits(self):
+        with patch("src.pipeline_queue.expand_url", side_effect=lambda u: u):
+            self.assertTrue(self.queue.enqueue("https://example.com/limit", "Limit"))
+
+        job = self.queue.get_jobs("queued_ingest", limit=1)[0]
+        self.queue.mark_ingested(
+            job_id=job["id"],
+            expanded_url=job["url_original"],
+            normalized_url=job["url_original"],
+            extracted_text="body",
+            is_youtube=False,
+        )
+
+        self.assertEqual(self.queue.claim_jobs("queued_llm", "processing_llm", limit=0), [])
+        self.assertEqual(self.queue.claim_jobs("queued_llm", "processing_llm", limit=-1), [])
+
+        remaining = self.queue.get_jobs("queued_llm", limit=10)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], job["id"])
+
+    def test_claim_jobs_moves_status_atomically(self):
+        with patch("src.pipeline_queue.expand_url", side_effect=lambda u: u):
+            self.assertTrue(self.queue.enqueue("https://example.com/1", "One"))
+            self.assertTrue(self.queue.enqueue("https://example.com/2", "Two"))
+            self.assertTrue(self.queue.enqueue("https://example.com/3", "Three"))
+
+        queued = self.queue.get_jobs("queued_ingest", limit=3)
+        for job in queued:
+            self.queue.mark_ingested(
+                job_id=job["id"],
+                expanded_url=job["url_original"],
+                normalized_url=job["url_original"],
+                extracted_text="body",
+                is_youtube=False,
+            )
+
+        claimed = self.queue.claim_jobs("queued_llm", "processing_llm", limit=2)
+        self.assertEqual(len(claimed), 2)
+        self.assertTrue(all(job["status"] == "processing_llm" for job in claimed))
+
+        remaining = self.queue.get_jobs("queued_llm", limit=10)
+        self.assertEqual(len(remaining), 1)
+
+        claimed_again = self.queue.claim_jobs("queued_llm", "processing_llm", limit=10)
+        self.assertEqual(len(claimed_again), 1)
+
+        claimed_none = self.queue.claim_jobs("queued_llm", "processing_llm", limit=10)
+        self.assertEqual(claimed_none, [])
 
 
 if __name__ == "__main__":

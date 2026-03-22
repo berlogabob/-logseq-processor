@@ -30,6 +30,7 @@ class MetadataMarkdownContractTests(unittest.TestCase):
             )
 
         self.assertIn("title:: Sample Title", props)
+        self.assertNotIn("alias::", props)
         self.assertIn("type:: article", props)
         self.assertIn("journal-day:: [[2024-01-30]]", props)
         self.assertIn("processed:: 2024-01-31", props)
@@ -90,6 +91,32 @@ class MetadataMarkdownContractTests(unittest.TestCase):
 
         self.assertIn("**Summary**", content)
         self.assertIn("**Шаг за шагом руководство**", content)
+        self.assertIn("**Достоверность**", content)
+
+    def test_build_content_hides_fallback_guidance_placeholder(self):
+        metadata = ArticleMetadata(
+            summary_ru="Fallback summary",
+            tags=["knowledge"],
+            author=None,
+            verification_notes="Fallback",
+            step_by_step_guidance="(не удалось извлечь)",
+        )
+
+        with patch("src.metadata.datetime", _FixedDateTime), patch(
+            "src.common.Config.get"
+        ) as mock_get:
+            class _Cfg:
+                content_max_length = 10_000
+
+            mock_get.return_value = _Cfg()
+            content = build_content(
+                title="Fallback Contract Test",
+                url="https://example.com/fallback-contract",
+                metadata=metadata,
+                extracted_text="Original extracted text",
+            )
+
+        self.assertNotIn("**Шаг за шагом руководство**", content)
         self.assertIn("**Достоверность**", content)
 
 

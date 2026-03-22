@@ -9,7 +9,9 @@ from .utils import expand_url, normalize_url
 
 ACTIVE_STATUSES = (
     "queued_ingest",
+    "processing_ingest",
     "queued_llm",
+    "processing_llm",
     "llm_done",
 )
 
@@ -58,14 +60,15 @@ class PipelineQueue:
     def enqueue(self, url: str, title: str, source_file: str | None = None) -> bool:
         expanded = expand_url(url) or url
         normalized = normalize_url(expanded)
+        active_placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
 
         with self._connect() as conn:
             exists = conn.execute(
-                """
+                f"""
                 SELECT 1
                 FROM jobs
                 WHERE url_normalized = ?
-                  AND status IN (?, ?, ?)
+                  AND status IN ({active_placeholders})
                 LIMIT 1
                 """,
                 (normalized, *ACTIVE_STATUSES),
@@ -99,6 +102,49 @@ class PipelineQueue:
                 (status, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def claim_jobs(self, from_status: str, to_status: str, limit: int) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM jobs
+                WHERE status = ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (from_status, limit),
+            ).fetchall()
+            if not rows:
+                conn.commit()
+                return []
+
+            ids = [row["id"] for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"""
+                UPDATE jobs
+                SET status = ?, updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                (to_status, now, *ids),
+            )
+            claimed_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM jobs
+                WHERE id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                (*ids,),
+            ).fetchall()
+            conn.commit()
+        return [dict(row) for row in claimed_rows]
 
     def mark_ingested(
         self,

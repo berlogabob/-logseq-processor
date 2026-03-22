@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent
 CONFIG_FILE = PROJECT_ROOT / "config.yaml"
 
 LOGS_HOME = Path.home() / ".logseq-processor"
@@ -42,8 +42,11 @@ class Config:
         self.rate_limit_delay_global: float = 1.0
         self.content_min_length: int = 100
         self.content_max_length: int = 8000
+        self.http_retry_429_count: int = 3
+        self.http_retry_429_backoff_seconds: float = 1.0
         self.llm_timeout_seconds: int = 30
         self.llm_temperature_attempts: list[float] = [0.05, 0.25, 0.50]
+        self.llm_max_parallel_jobs: int = 1
         self.folders_articles: str = "articles"
         self.folders_processed: str = "processed"
         self.folders_originals: str = "originals"
@@ -54,6 +57,7 @@ class Config:
         self.logging_folder: Path = LOGS_HOME / "logs"
         self.logging_retention_days: int = 7
         self.logging_console: bool = True
+        self.queue_heartbeat_seconds: float = 10.0
         self.warmup_llm: bool = True
 
     @classmethod
@@ -98,10 +102,21 @@ class Config:
         self.content_min_length = content.get("min_length", self.content_min_length)
         self.content_max_length = content.get("max_length", self.content_max_length)
 
+        http = data.get("http", {})
+        self.http_retry_429_count = http.get(
+            "retry_429_count", self.http_retry_429_count
+        )
+        self.http_retry_429_backoff_seconds = http.get(
+            "retry_429_backoff_seconds", self.http_retry_429_backoff_seconds
+        )
+
         llm = data.get("llm", {})
         self.llm_timeout_seconds = llm.get("timeout_seconds", self.llm_timeout_seconds)
         self.llm_temperature_attempts = llm.get(
             "temperature_attempts", self.llm_temperature_attempts
+        )
+        self.llm_max_parallel_jobs = max(
+            1, int(llm.get("max_parallel_jobs", self.llm_max_parallel_jobs))
         )
 
         folders = data.get("folders", {})
@@ -120,6 +135,9 @@ class Config:
             "retention_days", self.logging_retention_days
         )
         self.logging_console = logging_cfg.get("console", self.logging_console)
+        self.queue_heartbeat_seconds = float(
+            logging_cfg.get("queue_heartbeat_seconds", self.queue_heartbeat_seconds)
+        )
 
     def get_articles_folder(self) -> Path:
         return self.watch_folder / self.folders_articles
@@ -240,6 +258,31 @@ def log_print(message: str, emoji: str = ""):
     if emoji:
         prefix += f" {emoji}"
     print(f"{prefix} {message}", flush=True)
+
+
+_STAGE_COLORS = {
+    "FILE": "\033[36m",   # cyan
+    "QUEUE": "\033[33m",  # yellow
+    "LLM": "\033[35m",    # magenta
+    "SYSTEM": "\033[32m", # green
+}
+_ANSI_RESET = "\033[0m"
+
+
+def _supports_color() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def log_stage(stage: str, message: str):
+    ts = get_timestamp()
+    stage_upper = stage.upper()
+    marker = f"● {stage_upper}"
+    if _supports_color():
+        color = _STAGE_COLORS.get(stage_upper, "\033[37m")
+        marker = f"{color}{marker}{_ANSI_RESET}"
+    print(f"[{ts}] {marker} {message}", flush=True)
 
 
 def log_info(message: str):

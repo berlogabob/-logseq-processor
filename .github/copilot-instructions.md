@@ -38,11 +38,25 @@ Single-test command: not available yet (no test suite present).
 - Queue persistence for tab batches is stored at `~/.logseq-processor/queue.json` (`QueueManager`), allowing resume on restart.
 - Pipeline queue persists in `~/.logseq-processor/pipeline.db` (`PipelineQueue`) for staged ingest/LLM processing.
 
+## Practical tuning guidance
+
+- `llm.max_parallel_jobs` controls concurrent LLM queue workers:
+  - Start with `2` on typical desktop CPUs, keep `1` on low-RAM systems.
+  - Increase only if Ollama/model latency is low and memory headroom is available.
+- `logging.queue_heartbeat_seconds` controls periodic queue status logs:
+  - Use `10` for normal observability.
+  - Use `20-30` to reduce log noise on long-running workers.
+- `http.retry_429_count` and `http.retry_429_backoff_seconds` control 429 handling for URL fetches:
+  - Start with `retry_429_count: 3`, `retry_429_backoff_seconds: 1.0`.
+  - For aggressively rate-limited domains, try `5` and `2.0`.
+
 ## Key repository conventions
 
 - Treat `config.yaml` in repo root as runtime source of truth; code reads it through `Config.get()` singleton.
 - Preserve Logseq property format exactly (`title::`, `tags::`, `journal-day::`, `url::`, etc.); downstream duplicate detection depends on `url::` lines in generated `.md` files.
-- Keep URL normalization behavior stable (`normalize_url`): strips `www.`/`m.`, drops fragments, and retains only selected query keys (`v`, `p`, `id`, `q`, `search`).
+- Keep URL resolution + normalization behavior stable:
+  - `expand_url`/`resolve_url` now use layered redirect/wrapper/meta extraction with network-safety checks.
+  - `normalize_url` strips `www.`/`m.`, drops fragments, and retains only selected query keys (`v`, `p`, `id`, `q`, `search`).
 - Maintain folder routing semantics from config (`articles`, `processed`, `originals`, `errors`, `Other`) and avoid processing files already inside those buckets.
 - Errors are represented via `ProcessingError` enum and often encoded into filename suffixes when moving to `errors` (via `get_error_suffix`).
 - For LLM metadata extraction, expected response contract is strict JSON matching `ArticleMetadata`; code uses cleanup + pydantic validation and fallback metadata.
