@@ -64,46 +64,109 @@ Edit `config.yaml` to customize settings.
 
 ## GitHub Actions Integration
 
-Submit articles for processing via GitHub Actions without needing to run the processor locally:
+Two ways to process articles using GitHub Actions:
 
-### Quick Start
+### Way 1: Automatic Nextcloud Sync (Recommended)
 
-1. **Submit URLs** via GitHub → Actions → "Process Articles" workflow
-   - Input comma-separated URLs
-   - Optionally add titles and tags
-   - Workflow validates and queues articles
+Drop `.md` files in `~/Nextcloud/Notes/` → Auto-sync → GitHub processes → Results sync back
 
-2. **Run Local Worker** (where Ollama is available)
-   ```bash
-   git pull
-   uv run logseq-processor --worker ingest
-   uv run logseq-processor --worker llm
-   ```
+**Setup (one-time):**
 
-3. **Sync Results** back to GitHub (optional)
-   - Use "Sync Processed Files" workflow, or
-   - Manually: `git add articles/ queue/ && git commit && git push`
+```bash
+# 1. Get GitHub token from: https://github.com/settings/tokens
+# 2. Set environment variable
+export GITHUB_TOKEN=ghp_XXXXXXXXXXXXXXXXXXXX
 
-**See [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md) for full setup guide.**
+# 3. Start both scripts (in separate terminals)
+Terminal 1: python scripts/sync_nextcloud_to_github.py --watch
+Terminal 2: python scripts/pull_processed_articles.py --daemon
+```
+
+**Usage:**
+
+```bash
+# Create file with URL
+echo "Check this: https://github.blog/article" > ~/Nextcloud/Notes/article.md
+
+# Wait ~10 minutes...
+
+# Check results
+ls ~/Nextcloud/Notes/articles/
+```
+
+Benefits:
+- ✅ Natural workflow (drop files, they process automatically)
+- ✅ No GitHub UI needed
+- ✅ Can batch multiple URLs via tabs*.html
+- ✅ Results automatically pull back
+
+**See [docs/SYNC_SETUP.md](docs/SYNC_SETUP.md) for detailed setup.**
+
+### Way 2: Manual GitHub UI
+
+Go to GitHub Actions, paste URL, click "Run" → GitHub processes → Pull results
+
+**Usage:**
+
+```bash
+# Go to: GitHub → Actions → "Process Articles (End-to-End)"
+# 1. Paste URLs: https://github.blog/article
+# 2. Click "Run workflow"
+# 3. Wait ~10 minutes
+# 4. git pull
+# 5. Check ~/Nextcloud/Notes/articles/
+```
+
+Benefits:
+- ✅ Quickest for single articles
+- ✅ No local setup needed
+- ✅ Works from anywhere (phone, web UI)
 
 ### Architecture
 
 ```
-GitHub Actions (Queue URLs)
-    ↓
-Local Worker (Ingest + LLM processing)
-    ↓
-GitHub (Sync Results)
+Way 1: Automatic Sync          Way 2: Manual GitHub UI
+───────────────────────────    ───────────────────────────
+Nextcloud/Notes/               GitHub Actions
+    ↓                          ↓
+sync_nextcloud_to_github.py    (User triggers manually)
+    ↓                          ↓
+GitHub API → GitHub Actions    GitHub Actions
+    ↓                          ↓
+process-articles workflow      process-articles workflow
+(with Docker Ollama)           (with Docker Ollama)
+    ↓                          ↓
+git push to repo               git push to repo
+    ↓                          ↓
+pull_processed_articles.py     git pull
+    ↓                          ↓
+Nextcloud/Notes/articles/      Nextcloud/Notes/articles/
 ```
 
-Key files:
-- `.github/workflows/process-articles.yml` - Submit URLs
+**Key files:**
+- `scripts/sync_nextcloud_to_github.py` - Way 1 watch & sync
+- `scripts/pull_processed_articles.py` - Way 1 pull results
+- `.github/workflows/process-articles.yml` - End-to-end processing
 - `.github/workflows/test.yml` - Run validation tests
-- `.github/workflows/sync-processed.yml` - Pull results back
-- `queue/status.json` - Track processing state
-- `scripts/validate_urls.py` - URL validation utility
-- `scripts/queue_to_markdown.py` - Queue generation
-- `scripts/check_queue.py` - Monitor queue status
+- `docs/SYNC_SETUP.md` - Detailed setup guide for Way 1
+- `docs/GITHUB_ACTIONS.md` - Complete GitHub Actions documentation
+
+**Choose your workflow:**
+
+| Feature | Way 1 (Auto) | Way 2 (Manual) |
+|---------|--------------|----------------|
+| Nextcloud integration | ✅ Native | ✅ Via git pull |
+| Auto-detection | ✅ File watcher | ✗ Manual |
+| Setup complexity | Medium (2 scripts) | Low (none) |
+| Best for | Batch processing | Single articles |
+| Works from phone | ✗ | ✅ |
+| Requires local daemon | ✅ (2 terminals) | ✗ |
+
+**Quick start guide:**
+
+1. For **Way 1** → See [docs/SYNC_SETUP.md](docs/SYNC_SETUP.md)
+2. For **Way 2** → Go to GitHub Actions UI, click "Process Articles (End-to-End)", fill form
+3. For **full details** → See [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
 
 ## Link resolution behavior
 

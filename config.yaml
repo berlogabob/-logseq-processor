@@ -53,3 +53,25 @@ logging:
 # 5. Results are committed back and synced to GitHub
 #
 # See docs/GITHUB_ACTIONS.md for full setup instructions
+
+# ================================
+# Hybrid Sync Configuration (Phase 6)
+# ================================
+# Enable automatic sync between Nextcloud and GitHub Actions
+#
+# Two ways to use:
+#   Way 1: Drop files in Nextcloud/Notes → Auto-syncs to GitHub → Results pull back
+#   Way 2: Manually input URLs in GitHub Actions UI → Results pull back
+#
+# To use Way 1, run both scripts:
+#   Terminal 1: python scripts/sync_nextcloud_to_github.py --watch
+#   Terminal 2: python scripts/pull_processed_articles.py --daemon
+#
+# See docs/SYNC_SETUP.md for detailed instructions
+
+sync:
+  enabled: true
+  nextcloud_folder: ~/Nextcloud/Notes
+  github_workflow_id: process-articles
+  pull_interval_seconds: 300  # Check for new articles every 5 min
+  sync_cache_file: ~/.logseq-processor/sync_tracker.json
