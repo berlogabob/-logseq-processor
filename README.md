@@ -1,61 +1,90 @@
 # Logseq Processor
 
-Process articles with AI-powered metadata extraction using GitHub Actions.
+Process articles with AI-powered metadata extraction for Logseq.
 
 ## 🎯 How It Works
 
-**Simple 3-step workflow:**
+**Two ways to process articles:**
 
-1. **Copy files** → `01_inbox/` folder
-2. **Push to GitHub** → `git push`
-3. **Pull results** → `git pull` (check `03_success/` and `04_failed/`)
+### Option 1: Local Processing (Recommended) ⭐
 
-That's it! No complex setup, no background scripts.
+1. **Add files to inbox** → Place `.md` files in `01_inbox/`
+2. **Run processor locally** → `uv run logseq-processor 01_inbox/`
+3. **Check results** → Processed files appear in your configured output folder
 
-## 📁 The Kanban Folders
+**Requires:** Python 3.11+, Ollama running locally
+
+### Option 2: Queue URLs via GitHub Actions
+
+1. **Queue URLs** → Use GitHub Actions "Queue URLs for Processing" workflow
+2. **Process locally** → Run `uv run logseq-processor` to process queued items
+3. **Sync results** → Use "Sync Processed Files" workflow to push results back
+
+## 📁 Folder Structure
 
 ```
-01_inbox/        ← You put .md files here
-   ↓ (GitHub Action processes automatically)
-02_processing/   ← Files being processed (visible progress)
-   ↓
-03_success/      ← ✓ Finished articles (ready to use!)
-04_failed/       ← ✗ Files with errors (see filename for reason)
+01_inbox/        ← Place .md files or short-link files here
+02_processing/   ← Files currently being processed
+03_success/      ← ✓ Successfully processed articles
+04_failed/       ← ✗ Files with errors (check filename for reason)
+originals/       ← Backup of original files
+queue/           ← URL queue for batch processing
 ```
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Local Processing)
 
-### Step 1: Add Your Files
+### Step 1: Install Dependencies
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install project dependencies
+cd logseq-processor
+uv sync
+```
+
+### Step 2: Start Ollama
+
+```bash
+# Make sure Ollama is running with your model
+ollama pull qwen3.5:9b  # or your preferred model
+ollama serve
+```
+
+### Step 3: Add Files to Process
 
 ```bash
 # Copy article files to the inbox folder
-cp ~/Nextcloud/Notes/article.md logseq-processor/01_inbox/
-cp ~/Nextcloud/Notes/another.md logseq-processor/01_inbox/
+cp ~/Downloads/article.md 01_inbox/
+# Or create short-link files with just a URL
+echo "https://example.com/article" > 01_inbox/article.md
 ```
 
-### Step 2: Push to GitHub
+### Step 4: Run the Processor
 
 ```bash
-cd logseq-processor
-git add 01_inbox/
-git commit -m "Add articles for processing"
-git push origin main
+# Process all files in inbox
+uv run logseq-processor 01_inbox/
+
+# Or run in watch mode (continuous monitoring)
+uv run logseq-processor --watch
+
+# Force reprocessing (bypass cache)
+uv run logseq-processor 01_inbox/ --force
+
+# Use different model
+uv run logseq-processor 01_inbox/ --model llama3:8b
+
+# Debug mode
+uv run logseq-processor 01_inbox/ --debug
 ```
 
-### Step 3: Wait & Pull
+### Step 5: Use Results
 
-GitHub Action automatically processes your files (~10-30 minutes per article).
-
-```bash
-# Check results
-git pull
-ls 03_success/        # Successfully processed articles
-ls 04_failed/         # Any errors (check filename for reason)
-```
-
-### Step 4: Use Results
-
-Copy files from `03_success/` to your Logseq library.
+Processed articles appear in the configured output folder (check `config.yaml`).
+Successfully processed: `03_success/`
+Failed files: `04_failed/` (with error in filename)
 
 ## ✅ What Gets Generated
 
@@ -108,81 +137,171 @@ git commit -m "Force retry: article.md"
 git push
 ```
 
-## 📊 What Happens Behind the Scenes
+## 🔄 Using GitHub Actions (Optional)
 
-1. **File detection**: Action detects files in `01_inbox/`
-2. **Move to processing**: Files moved to `02_processing/` (shows progress)
-3. **Extract content**: Downloads article from URL
-4. **Extract text**: Uses web parsing to get readable content
-5. **Generate metadata**: Ollama LLM creates title, tags, summary
-6. **Create markdown**: Formats as Logseq-ready markdown
-7. **Move to result folder**: 
-   - Success → `03_success/` ✓
-   - Error → `04_failed/` ✗
-8. **Commit & push**: Results saved to GitHub
+### Workflow 1: Queue URLs for Processing
+
+Use this to manually queue URLs for later processing:
+
+1. Go to **Actions** tab in GitHub
+2. Select **"Queue URLs for Processing (Manual)"**
+3. Click **"Run workflow"**
+4. Enter URLs (comma-separated)
+5. Optionally add titles, tags, force reprocessing
+6. URLs are added to `queue/` folder
+
+### Workflow 2: Sync Processed Files
+
+After processing locally, sync results back to GitHub:
+
+1. Go to **Actions** tab
+2. Select **"Sync Processed Files"**
+3. Click **"Run workflow"**
+4. Processed articles are committed and pushed
+
+### Workflow 3: Tests and Validation
+
+Runs automatically on every push to validate code integrity.
+
+## 📊 How Processing Works
+
+1. **File detection**: Processor scans `01_inbox/` for files
+2. **File classification**: 
+   - Short `.md` files (≤2 lines) → Extract URL
+   - `tabs*.html` → Parse as multi-link batch
+   - Plain `.html` → Move to originals
+3. **URL processing**:
+   - Validate & normalize URL
+   - Check if already processed (cache)
+   - Fetch content (Trafilatura for web, YouTube API for videos)
+4. **LLM metadata extraction**: Generate title, tags, summary, journal-day
+5. **Create Logseq markdown**: Format with frontmatter-style properties
+6. **Save result**: 
+   - Success → Configured output folder
+   - Error → `04_failed/` with error code in filename
 
 ## ⏱️ Processing Time
 
-- **First run**: 10-20 minutes (model download + processing)
-- **Subsequent runs**: 10-15 minutes per article
-- **Factors**: Content size, complexity, Ollama model performance
+- **Local processing**: 10-30 seconds per article (with local Ollama)
+- **First run**: May need to download model (~5GB for qwen3.5:9b)
+- **Factors**: Content size, model speed, hardware (GPU recommended)
 
 ## 🐛 Troubleshooting
 
+**Ollama connection errors?**
+- Make sure Ollama is running: `ollama serve`
+- Check if model is available: `ollama list`
+- Verify Ollama URL in `config.yaml` (default: `http://localhost:11434`)
+
 **Files not being processed?**
-- Check GitHub Actions is enabled in repo settings
 - Verify files are in `01_inbox/` folder
-- Check workflow run status in Actions tab
+- Check if URLs are valid and accessible
+- Look at `~/.logseq-processor/logs/processor.log` for errors
 
-**Files in `02_processing/` stuck?**
-- Action may have timed out
-- Check GitHub Actions logs for errors
-- Try pushing a dummy change to trigger action again
+**"Already processed" skipping files?**
+- Processor caches processed URLs to avoid duplicates
+- Use `--force` flag to bypass cache
+- Or delete the file from output folder and reprocess
 
-**Same file keeps failing?**
-- Read the error code in filename
-- Fix the issue (website down, bad URL, etc)
-- Re-upload with `--force` flag
-
-**Processing is very slow?**
-- First run downloads Ollama model (~5GB) - this takes time
-- Very long articles take longer
-- Model caching speeds up subsequent articles
+**Processing is slow?**
+- First run downloads Ollama model (~5GB)
+- Large articles take longer to process
+- GPU acceleration significantly speeds up LLM processing
+- Adjust `llm.max_parallel_jobs` in `config.yaml` (default: 2)
 
 ## 📦 Dependencies
 
-- Python 3.11+
-- GitHub Actions (free, included)
-- Ollama in Docker (runs in GitHub)
-- No local setup needed!
+- Python 3.11+ (3.12 or 3.13 recommended)
+- uv (Python package manager)
+- Ollama (for LLM metadata extraction)
+- Required Python packages (installed via `uv sync`):
+  - trafilatura (web content extraction)
+  - beautifulsoup4 (HTML parsing)
+  - ollama (Ollama API client)
+  - watchdog (file monitoring)
+  - pydantic (data validation)
+  - requests (HTTP client)
+  - youtube_transcript_api (YouTube transcripts)
+  - pyyaml (config file parsing)
 
 ## 🎯 Features
 
 ✅ **Automatic URL extraction** from markdown files  
-✅ **LLM metadata generation** (title, tags, summary)  
+✅ **LLM metadata generation** (title, tags, summary, journal-day)  
+✅ **YouTube transcript support** (no scraping needed)  
+✅ **Short-link expansion** (t.co, bit.ly, etc.)  
+✅ **Multi-URL batch processing** (tabs*.html files)  
+✅ **Duplicate detection** (URL-based caching)  
+✅ **Rate limiting** (per-domain and global)  
+✅ **Worker split mode** (separate ingest/LLM workers)  
+✅ **Watch mode** (continuous folder monitoring)  
 ✅ **Error handling** with detailed error codes  
-✅ **Transparent progress** in folder structure  
-✅ **Easy retry** for failed files  
-✅ **Logseq ready** output  
-✅ **No local Ollama needed** (runs in GitHub)
+✅ **Logseq-ready** markdown output  
+✅ **Configurable** via `config.yaml`
 
-## 📝 Notes
+## 📝 Configuration
 
-- Files in `02_processing/` keep history (not deleted)
-- Filenames include timestamp (for sorting)
-- Original files moved out of `01_inbox/` after processing
-- Git history shows all processing activity
+Edit `config.yaml` in the repository root to customize:
 
-## 🚀 That's All!
+```yaml
+# Watch folder
+folders:
+  watch: "01_inbox"
+  
+# LLM settings
+llm:
+  base_url: "http://localhost:11434"
+  model: "qwen3.5:9b"
+  max_parallel_jobs: 2  # Concurrent LLM requests
+  
+# Rate limiting
+http:
+  rate_limit_requests: 10
+  rate_limit_period: 60
+  
+# And many more options...
+```
 
-Simple, transparent, no complex setup. Just:
-1. Copy files to `01_inbox/`
-2. Push to GitHub
-3. Pull results when done
+See `config.yaml` for full configuration options.
 
-Questions? Check the folder structure - it shows everything! 📁
+## 🔧 Advanced Usage
+
+### Worker Split Mode
+
+Run separate workers for ingest and LLM processing:
+
+```bash
+# Terminal 1: Ingest worker (fetch/extract content)
+uv run logseq-processor --worker ingest
+
+# Terminal 2: LLM worker (generate metadata)
+uv run logseq-processor --worker llm
+```
+
+### Queue Management
+
+```bash
+# Check queue status
+python scripts/check_queue.py
+
+# Validate URLs before queueing
+python scripts/validate_urls.py "https://example.com" "https://another.com"
+
+# Queue URLs to markdown
+python scripts/queue_to_markdown.py "https://example.com" --tags="tech,ai"
+```
 
 ---
 
-**Version**: Kanban Workflow (Simplified)  
+## 📚 Documentation
+
+- **Architecture**: See `docs/` folder for detailed documentation
+- **Configuration**: Full options in `config.yaml`
+- **Logs**: `~/.logseq-processor/logs/processor.log`
+- **Queue**: `~/.logseq-processor/queue.json`
+- **Pipeline DB**: `~/.logseq-processor/pipeline.db`
+
+---
+
+**Version**: 2.0 (Worker Split, Pipeline Queue)  
 **Last Updated**: March 30, 2026

@@ -1,4 +1,4 @@
-name: Process Articles
+name: Queue URLs for Processing (Manual)
 
 on:
   workflow_dispatch:
