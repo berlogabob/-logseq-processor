@@ -16,51 +16,93 @@ This separation allows you to:
 
 ## Architecture
 
+### ✨ NEW: Fully Automated End-to-End (Recommended)
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     GitHub Actions                               │
+│                     GitHub Actions Workflow                      │
+│              "Process Articles (End-to-End)" ⭐ NEW               │
 │                                                                  │
-│  1. Process Articles Workflow                                    │
-│     - Accept URL input (batch)                                   │
-│     - Validate URLs (regex + HTTP HEAD)                          │
-│     - Generate queue files (queue/pending_*.md)                  │
-│     - Commit to main branch                                      │
+│  1. Validate URLs                                                │
+│     - Regex format check                                         │
+│     - Optional HTTP HEAD check                                   │
+│                                                                  │
+│  2. Start Docker Ollama Container                                │
+│     - Spins up Ollama service automatically                      │
+│     - Pulls configured model                                     │
+│                                                                  │
+│  3. Extract Content (Ingest)                                     │
+│     uv run logseq-processor --worker ingest                      │
+│     - Fetch HTML from URLs                                       │
+│     - Extract readable text                                      │
+│     - Handle YouTube transcripts                                 │
+│                                                                  │
+│  4. Generate Metadata (LLM)                                      │
+│     uv run logseq-processor --worker llm                         │
+│     - Extract title, tags, summary via Ollama                    │
+│     - Generates final Logseq markdown                            │
+│     - Saves to articles/ folder                                  │
+│                                                                  │
+│  5. Commit Results                                               │
+│     - Pushes articles/ to main branch                            │
+│     - Updates queue/status.json                                  │
 └──────────────────┬───────────────────────────────────────────────┘
                    │
                    ↓ (Git pull)
 ┌──────────────────────────────────────────────────────────────────┐
-│                     Local Environment                            │
+│                    Your Local Repository                         │
 │                                                                  │
-│  2. Ingest Worker                                                │
+│  - articles/ folder has new processed articles                   │
+│  - Ready to use in Logseq immediately                            │
+│  - No local processing needed!                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Alternative: Queue-Only with Local Processing
+
+For more control or lower GitHub cost:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  GitHub Actions (Queue Only)                     │
+│                                                                  │
+│  1. Validate URLs                                                │
+│  2. Create queue files (queue/pending_*.md)                      │
+│  3. Commit to main branch                                        │
+└──────────────────┬───────────────────────────────────────────────┘
+                   │
+                   ↓ (Git pull)
+┌──────────────────────────────────────────────────────────────────┐
+│              Local Machine (Your Processing)                     │
+│                                                                  │
+│  1. Ingest Worker: Extract content from URLs                     │
 │     uv run logseq-processor --worker ingest                      │
-│     - Monitors queue/ folder                                     │
-│     - Extracts content from URLs                                 │
-│     - Queues articles for LLM processing                         │
 │                                                                  │
-│  3. LLM Worker                                                   │
+│  2. LLM Worker: Generate metadata with YOUR Ollama               │
 │     uv run logseq-processor --worker llm                         │
-│     - Consumes queued articles                                   │
-│     - Extracts metadata (title, tags, summary) via Ollama        │
-│     - Generates final Logseq markdown                            │
-│     - Saves to articles/ folder                                  │
+│                                                                  │
+│  3. Results in articles/ folder                                  │
 └──────────────────┬───────────────────────────────────────────────┘
                    │
                    ↓ (Git push)
 ┌──────────────────────────────────────────────────────────────────┐
-│                 GitHub (Results Repository)                      │
-│                                                                  │
-│  4. Sync Processed Workflow                                      │
-│     - Pulls processed articles back                              │
-│     - Updates queue/status.json                                  │
-│     - Commits results                                            │
+│                 GitHub (Results Synced Back)                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+
 ## Quick Start
 
-### 1. Submit Articles via GitHub Actions
+### ⚡ End-to-End Processing (NEW!)
 
-Go to **GitHub Repository → Actions → Process Articles** and click **"Run workflow"**.
+Go to **GitHub Repository → Actions → Process Articles (End-to-End)** and click **"Run workflow"**.
+
+**That's it!** The workflow now:
+1. ✓ Validates URLs  
+2. ✓ Extracts content
+3. ✓ **Runs Ollama LLM for metadata** (NEW!)
+4. ✓ Generates final markdown
+5. ✓ Commits articles to `articles/` folder
 
 **Inputs:**
 - **URLs** (required): `https://example.com,https://other.com/article`
@@ -68,55 +110,91 @@ Go to **GitHub Repository → Actions → Process Articles** and click **"Run wo
 - **Tags** (optional): `python,ai,tutorial`
 - **Force** (optional): Reprocess even if already done
 - **Check Reachable** (optional): Validate URL availability
+- **Ollama Model** (optional): Default is `qwen3.5:9b`, try `mistral:7b` for faster
 
 **Example:**
 ```
-URLs: https://github.com/status,https://openai.com/research
-Titles: GitHub Status,OpenAI Research
-Tags: github,ai
-Check Reachable: true
+URLs: https://github.blog/2024-01-new-features,https://openai.com/research
+Titles: GitHub Latest,OpenAI Research  
+Tags: github,ai,news
+Ollama Model: qwen3.5:9b
 ```
 
-The workflow will:
-1. ✓ Validate URLs
-2. ✓ Create queue files in `queue/pending_*.md`
-3. ✓ Update `queue/status.json`
-4. ✓ Commit to main branch
+**Processing time:**
+- 1-2 URLs: 3-5 minutes
+- 3-5 URLs: 8-15 minutes  
+- 5-10 URLs: 15-30 minutes
 
-### 2. Run Local Worker
+### No Local Processing Needed!
 
-On your machine with Ollama installed:
+Results are automatically:
+- ✓ Generated with Ollama LLM in Docker
+- ✓ Committed to `articles/` folder
+- ✓ Synced back to GitHub
 
+Just pull to get the latest articles:
 ```bash
-# Clone/pull the latest
-git clone https://github.com/YOUR_REPO/logseq-processor.git
-cd logseq-processor
 git pull
+```
 
+---
+
+## Alternative: Queue-Only Mode
+
+If you prefer to process locally instead:
+
+Use `.github/workflows/process-articles-queue-only.yml` (legacy)
+
+Then process locally:
+```bash
 # Install dependencies
 uv sync
 
 # Run ingest worker (extract content)
 uv run logseq-processor --worker ingest
 
-# Run LLM worker (generate metadata)
+# Run LLM worker (generate metadata with your local Ollama)
 uv run logseq-processor --worker llm
 ```
 
-Or run both in parallel (one terminal for each):
+Or run both in parallel:
 ```bash
 # Terminal 1: Ingest
 uv run logseq-processor --worker ingest
 
-# Terminal 2: LLM
+# Terminal 2: LLM  
 uv run logseq-processor --worker llm
 ```
 
-### 3. Check Queue Status
+### Check Queue Status
 
 ```bash
 # Show full queue status
 python scripts/check_queue.py
+
+# Show summary only
+python scripts/check_queue.py --summary
+
+# Show pending items
+python scripts/check_queue.py --pending
+
+# Show errors
+python scripts/check_queue.py --errors
+```
+
+### Sync Results Back to GitHub
+
+Once processing is complete:
+
+```bash
+# Push results
+git add articles/ queue/
+git commit -m "Processed articles"
+git push
+```
+
+Or use the GitHub Actions workflow:
+Go to **Actions → Sync Processed Files → Run workflow**
 
 # Show summary only
 python scripts/check_queue.py --summary

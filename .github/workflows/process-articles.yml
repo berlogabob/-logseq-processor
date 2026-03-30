@@ -1,4 +1,4 @@
-name: Process Articles
+name: Process Articles (End-to-End)
 
 on:
   workflow_dispatch:
@@ -24,13 +24,26 @@ on:
         required: false
         type: boolean
         default: true
+      ollama_model:
+        description: 'Ollama model to use (default: qwen3.5:9b)'
+        required: false
+        type: string
+        default: 'qwen3.5:9b'
 
 jobs:
-  queue-urls:
+  process-articles-e2e:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
+    
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        options: --gpus all
+        ports:
+          - 11434:11434
+        volumes:
+          - ollama_data:/root/.ollama
     
     steps:
       - name: Checkout repository
@@ -49,78 +62,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pyyaml
 
-      - name: Deduplicate URLs
-        id: dedupe
+      - name: Wait for Ollama to be ready
+        id: ollama_ready
         run: |
-          python3 << 'EOF'
-          import json
-          from pathlib import Path
-          from urllib.parse import urlparse
+          echo "Waiting for Ollama service to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+              echo "✓ Ollama is ready"
+              echo "ollama_ready=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "  Attempt $i/30 - waiting..."
+            sleep 2
+          done
+          echo "✗ Ollama failed to start"
+          echo "ollama_ready=false" >> $GITHUB_OUTPUT
+          exit 1
+        continue-on-error: true
+
+      - name: Pull Ollama model
+        if: steps.ollama_ready.outputs.ollama_ready == 'true'
+        id: pull_model
+        run: |
+          MODEL="${{ github.event.inputs.ollama_model }}"
+          echo "Pulling model: $MODEL"
+          curl -X POST http://localhost:11434/api/pull -d "{\"name\": \"$MODEL\"}" \
+            -H "Content-Type: application/json" || true
           
-          urls_input = "${{ github.event.inputs.urls }}"
-          urls = [u.strip() for u in urls_input.split(',')]
-          
-          # Remove duplicates (case-insensitive)
-          seen = set()
-          unique_urls = []
-          for url in urls:
-              normalized = url.lower().strip()
-              if normalized not in seen:
-                  seen.add(normalized)
-                  unique_urls.append(url)
-          
-          print(f"Input: {len(urls)} URLs, Deduplicated: {len(unique_urls)} URLs")
-          
-          if len(urls) != len(unique_urls):
-              print(f"  Removed {len(urls) - len(unique_urls)} duplicate(s)")
-          
-          # Check for already processed URLs
-          articles_dir = Path('articles')
-          if articles_dir.exists():
-              article_files = list(articles_dir.glob('*.md'))
-              
-              # Extract URLs from articles
-              processed_urls = set()
-              for article in article_files:
-                  try:
-                      content = article.read_text()
-                      for line in content.split('\n'):
-                          if line.startswith('url:: '):
-                              proc_url = line.replace('url:: ', '').strip().lower()
-                              processed_urls.add(proc_url)
-                  except:
-                      pass
-              
-              # Filter out already processed
-              already_processed = [u for u in unique_urls if u.lower() in processed_urls]
-              if already_processed:
-                  print(f"\n  ⚠ Already processed ({len(already_processed)}):")
-                  for u in already_processed[:5]:
-                      print(f"    - {u}")
-                  if len(already_processed) > 5:
-                      print(f"    ... and {len(already_processed) - 5} more")
-              
-              # Filter unless --force
-              if "${{ github.event.inputs.force }}" != "true":
-                  unique_urls = [u for u in unique_urls if u.lower() not in processed_urls]
-                  print(f"\n  Filtered to {len(unique_urls)} unprocessed URLs (use force=true to reprocess)")
-          
-          # Save for next step
-          print("\n::group::URLs to queue")
-          for u in unique_urls:
-              print(f"  {u}")
-          print("::endgroup::")
-          
-          # Pass to next step
-          print(f"\nURLS_TO_QUEUE={','.join(unique_urls)}" >> os.environ.get('GITHUB_ENV', '/dev/null'))
-          
-          import os
-          env_file = os.getenv('GITHUB_ENV')
-          if env_file:
-              with open(env_file, 'a') as f:
-                  f.write(f"URLS_TO_QUEUE={','.join(unique_urls)}\n")
-          
-          EOF
+          echo "Waiting for model to be available..."
+          sleep 10
+        continue-on-error: true
 
       - name: Validate and queue URLs
         id: queue
@@ -158,86 +129,138 @@ jobs:
           
           echo "queued=$QUEUED" >> $GITHUB_OUTPUT
           echo "failed=$FAILED" >> $GITHUB_OUTPUT
-          echo "exit_code=$QUEUE_EXIT" >> $GITHUB_OUTPUT
 
-      - name: Update queue status
-        id: status
+      - name: Run ingest worker
+        if: steps.queue.outputs.queued > 0 && steps.ollama_ready.outputs.ollama_ready == 'true'
+        id: ingest
+        run: |
+          echo "Running ingest worker to extract content from URLs..."
+          uv sync
+          uv run logseq-processor --worker ingest --debug 2>&1 | tee ingest_output.log || true
+          
+          # Count processed files
+          PROCESSED=$(find queue/ -name "*.md" | wc -l || echo "0")
+          echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Run LLM worker
+        if: steps.ingest.outcome != 'failure' && steps.ollama_ready.outputs.ollama_ready == 'true'
+        id: llm
+        run: |
+          echo "Running LLM worker to generate metadata..."
+          export OLLAMA_BASE_URL=http://localhost:11434
+          
+          # Create temporary config with Ollama settings
+          python3 << 'CONFIG_EOF'
+          import yaml
+          import os
+          
+          # Load existing config
+          with open('config.yaml') as f:
+              config = yaml.safe_load(f)
+          
+          # Update for GitHub Actions
+          config['model'] = os.getenv('OLLAMA_MODEL', 'qwen3.5:9b')
+          config['watch_folder'] = 'queue'
+          config['llm']['timeout_seconds'] = 180
+          config['llm']['max_parallel_jobs'] = 1
+          
+          # Write modified config
+          with open('config.yaml', 'w') as f:
+              yaml.dump(config, f)
+          
+          print("✓ Updated config for GitHub Actions LLM processing")
+          
+          CONFIG_EOF
+          
+          uv run logseq-processor --worker llm --debug 2>&1 | tee llm_output.log || true
+          
+          # Count generated articles
+          ARTICLES=$(find articles/ -name "*.md" 2>/dev/null | wc -l || echo "0")
+          echo "articles=$ARTICLES" >> $GITHUB_OUTPUT
+        env:
+          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+        continue-on-error: true
+
+      - name: Check processing results
+        id: results
         run: |
           python3 << 'EOF'
           import json
           from pathlib import Path
-          from datetime import datetime, timezone
           
-          status_file = Path('../queue/status.json')
-          status = json.loads(status_file.read_text())
+          articles_dir = Path('articles')
+          articles = list(articles_dir.glob('*.md')) if articles_dir.exists() else []
           
-          # Count pending items
-          pending_count = len(status.get('queued', []))
-          total_queued = status['stats'].get('total_queued', 0)
+          print(f"✓ Generated {len(articles)} articles")
+          for article in articles[:5]:
+              print(f"  - {article.name}")
+          if len(articles) > 5:
+              print(f"  ... and {len(articles) - 5} more")
           
-          print(f"Queue Status:")
-          print(f"  Total queued so far: {total_queued}")
-          print(f"  Currently pending: {pending_count}")
+          # Count queue items
+          queue_items = list(Path('queue').glob('pending_*.md'))
+          if queue_items:
+              print(f"\n⚠ {len(queue_items)} queue items remaining")
           
           EOF
-        working-directory: scripts
 
-      - name: Create commit message
-        id: commit
-        run: |
-          QUEUED=${{ steps.queue.outputs.queued }}
-          FAILED=${{ steps.queue.outputs.failed }}
-          
-          if [ "$FAILED" = "0" ]; then
-            MSG="[GitHub Actions] Queue batch: $QUEUED URLs queued"
-          else
-            MSG="[GitHub Actions] Queue batch: $QUEUED URLs queued, $FAILED invalid/unreachable"
-          fi
-          
-          echo "message=$MSG" >> $GITHUB_OUTPUT
-          echo "Summary: $MSG" >> $GITHUB_STEP_SUMMARY
-
-      - name: Commit and push
-        if: steps.queue.outputs.queued > 0
+      - name: Commit processed articles
+        if: steps.llm.outputs.articles > 0
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          git add queue/
-          git commit -m "${{ steps.commit.outputs.message }}" \
-            -m "Workflow run: ${{ github.run_id }}" \
-            -m "User: ${{ github.actor }}"
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Check if there are new articles to commit
+          git add articles/ queue/status.json || true
+          
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[GitHub Actions] Processed articles (end-to-end)
+
+Workflow: Process Articles (End-to-End)
+Model: ${{ github.event.inputs.ollama_model }}
+URLs: ${{ github.event.inputs.urls }}
+Run: ${{ github.run_id }}"
+            git push
+            echo "✓ Committed results to main branch"
+          fi
 
       - name: Job summary
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## Queue Results
+          ## Processing Results
           
-          - **Queued**: ${{ steps.queue.outputs.queued }} URLs
-          - **Failed**: ${{ steps.queue.outputs.failed }} URLs
+          ### Input
+          - **URLs submitted**: ${{ steps.queue.outputs.queued }}
+          - **Validation failed**: ${{ steps.queue.outputs.failed }}
+          
+          ### Processing
+          - **Ollama ready**: ${{ steps.ollama_ready.outputs.ollama_ready }}
+          - **Model used**: ${{ github.event.inputs.ollama_model }}
+          - **Articles generated**: ${{ steps.llm.outputs.articles }}
+          
+          ### Status
+          - **Queued**: ${{ steps.queue.outcome }}
+          - **Ingest**: ${{ steps.ingest.outcome }}
+          - **LLM**: ${{ steps.llm.outcome }}
+          - **Committed**: ${{ job.status }}
           
           ### Next Steps
           
-          1. Wait for the local worker to process queued items
-          2. Monitor progress with: `python scripts/check_queue.py`
-          3. Processed articles will appear in the `articles/` folder
-          4. Sync results back to GitHub using the "Sync Processed Files" workflow
+          1. Pull latest articles: `git pull`
+          2. Review generated articles in `articles/` folder
+          3. Check `queue/status.json` for processing state
+          4. Submit more URLs with this workflow
+          
+          **Note**: Processing time depends on:
+          - Number of URLs (1-5: 2-5 min, 5-10: 10-20 min)
+          - Content size and complexity
+          - Ollama model size and performance
           
           EOF
-          
-          if [ "${{ steps.queue.outputs.failed }}" != "0" ]; then
-            cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          
-          ⚠️ Some URLs failed validation. Check the logs above for details.
-          EOF
-          fi
 
-      - name: Report failure
-        if: failure() && steps.queue.outputs.exit_code != 0
-        run: |
-          echo "❌ Failed to queue articles. Check logs above for details."
-          exit 1
+volumes:
+  ollama_data:
