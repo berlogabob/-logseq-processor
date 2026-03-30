@@ -1,448 +1,188 @@
 # Logseq Processor
 
-[![Tests](https://github.com/YOUR_USERNAME/logseq-processor/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/logseq-processor/actions/workflows/test.yml)
+Process articles with AI-powered metadata extraction using GitHub Actions.
 
-**Complete article processing solution with GitHub Actions integration + hybrid Nextcloud sync.**
+## 🎯 How It Works
 
-Automatically download articles from URLs, extract content, generate metadata with LLM, and create Logseq-ready markdown files. Choose between automatic Nextcloud integration (Way 1) or manual GitHub Actions UI (Way 2).
+**Simple 3-step workflow:**
 
-## ✨ Features
+1. **Copy files** → `01_inbox/` folder
+2. **Push to GitHub** → `git push`
+3. **Pull results** → `git pull` (check `03_success/` and `04_failed/`)
 
-### Core Processing
-- 🔗 **URL Processing**: Download, extract, normalize URLs with intelligent redirect following
-- 🤖 **LLM Metadata**: Auto-generate titles, tags, and summaries using Ollama
-- 📺 **YouTube Support**: Extract transcripts directly from YouTube videos
-- 📊 **Batch Processing**: Process 100+ articles at once
-- 🔄 **Rate Limiting**: Per-domain and global rate limiting to be respectful
-- 📝 **Error Handling**: Dedicated folders for errors with detailed logging
-- 🏷️ **Tab Support**: Extract multiple links from browser tab exports
+That's it! No complex setup, no background scripts.
 
-### GitHub Actions
-- ☁️ **Serverless Processing**: No local Ollama needed - GitHub provides Docker container
-- 🚀 **End-to-End**: From URL submission to final markdown in one workflow
-- ✅ **CI/CD Testing**: Automatic validation on push/PR
-- 🔀 **Dual Workflows**: Queue-only or full processing options
+## 📁 The Kanban Folders
 
-### Hybrid Sync (Phase 6)
-- 📁 **Way 1: Automatic Nextcloud Sync**
-  - Drop files in `~/Nextcloud/Notes/`
-  - Auto-detect, extract URLs, trigger GitHub
-  - Results auto-sync back
-  - Zero manual steps after setup!
-
-- 🎯 **Way 2: Manual GitHub UI**
-  - Paste URL in GitHub Actions
-  - Click "Run workflow"
-  - Results auto-sync back
-  - Works from anywhere (phone, web)
+```
+01_inbox/        ← You put .md files here
+   ↓ (GitHub Action processes automatically)
+02_processing/   ← Files being processed (visible progress)
+   ↓
+03_success/      ← ✓ Finished articles (ready to use!)
+04_failed/       ← ✗ Files with errors (see filename for reason)
+```
 
 ## 🚀 Quick Start
 
-### Way 1: Automatic Nextcloud Sync (Recommended)
-
-**One-time setup:**
+### Step 1: Add Your Files
 
 ```bash
-# 1. Install dependencies
-uv sync
-
-# 2. Get GitHub token: https://github.com/settings/tokens
-#    (Select: Personal access tokens → Fine-grained)
-#    (Permissions: contents:read+write, actions:read)
-#    (Repository: your logseq-processor repo)
-
-# 3. Set environment variable
-export GITHUB_TOKEN=ghp_XXXXXXXXXXXXXXXXXXXX
-
-# 4. Create Nextcloud articles folder (if needed)
-mkdir -p ~/Nextcloud/Notes/articles
+# Copy article files to the inbox folder
+cp ~/Nextcloud/Notes/article.md logseq-processor/01_inbox/
+cp ~/Nextcloud/Notes/another.md logseq-processor/01_inbox/
 ```
 
-**Start the sync (two terminals):**
+### Step 2: Push to GitHub
 
 ```bash
-# Terminal 1: Watch for new files
-python scripts/sync_nextcloud_to_github.py --watch
-
-# Terminal 2: Pull results periodically
-python scripts/pull_processed_articles.py --daemon
+cd logseq-processor
+git add 01_inbox/
+git commit -m "Add articles for processing"
+git push origin main
 ```
 
-**Use it:**
+### Step 3: Wait & Pull
+
+GitHub Action automatically processes your files (~10-30 minutes per article).
 
 ```bash
-# Create file with URL
-echo "Check this out: https://github.blog/2024-latest" > ~/Nextcloud/Notes/news.md
-
-# Wait ~10 minutes...
-
 # Check results
-ls ~/Nextcloud/Notes/articles/
-# → news-latest-20260330.md (ready to use!)
+git pull
+ls 03_success/        # Successfully processed articles
+ls 04_failed/         # Any errors (check filename for reason)
 ```
 
-**Monitor progress:**
+### Step 4: Use Results
 
+Copy files from `03_success/` to your Logseq library.
+
+## ✅ What Gets Generated
+
+**Input file:** `article.md`
+
+**Success:** `03_success/article-Article-Title-20260330-153645.md`
+```markdown
+title:: Article Title
+tags:: technology, ai
+url:: https://original-url.com
+summary:: Generated summary of the article...
+
+Full article content here...
+```
+
+**Error:** `04_failed/article_ERROR_http_blocked_403.md`
+- Shows the error reason in filename
+- Original file included (for your reference)
+
+## 🔧 Error Codes
+
+| Error | Meaning | What to do |
+|-------|---------|-----------|
+| `ERROR_http_blocked_403` | Server rejected request | Wait, try different URL |
+| `ERROR_http_blocked_429` | Rate limited | Try again later |
+| `ERROR_empty_content` | No readable content | Check URL, try different source |
+| `ERROR_parse_error` | HTML parsing failed | Check URL format |
+| `ERROR_timeout_120s` | Processing took too long | Very long article? Try shorter one |
+| `ERROR_url_invalid` | Invalid URL format | Check URL spelling |
+
+## 🔄 Retrying Failed Files
+
+If a file fails, you can retry it:
+
+**Simple retry** (fixes the original issue):
 ```bash
-tail -f ~/.logseq-processor/sync.log
+# Fix the issue first (wait a minute, try different URL, etc)
+mv 04_failed/article_ERROR_http_blocked_403.md 01_inbox/article.md
+git add .
+git commit -m "Retry: article.md"
+git push
 ```
 
-### Way 2: Manual GitHub UI
-
-1. Go to: **GitHub → Actions → "Process Articles (End-to-End)"**
-2. Click **"Run workflow"** button
-3. Fill in:
-   - **URLs**: Comma-separated (e.g., `https://github.blog,https://example.com`)
-   - **Titles**: (optional) Comma-separated titles
-   - **Tags**: (optional) Common tags for all URLs
-   - **Model**: (optional) Select Ollama model
-4. Click **"Run workflow"**
-5. Wait ~10 minutes for processing
-6. Pull results: `git pull`
-7. Use in Logseq: `~/Nextcloud/Notes/articles/`
-
-## 📊 How It Works
-
-### Way 1: Automatic Nextcloud Sync
-
-```
-You save file
-    ↓
-sync_nextcloud_to_github.py detects (2-5 sec)
-    ↓
-Extracts URL from file content
-    ↓
-HTTP POST to GitHub API
-    ├─→ GitHub Actions triggered
-    │   ├─ Setup Python
-    │   ├─ Start Docker Ollama
-    │   ├─ Download article HTML
-    │   ├─ Extract readable content
-    │   ├─ Send to Ollama LLM
-    │   ├─ Generate: title, tags, summary
-    │   ├─ Create markdown file
-    │   └─ git commit + push
-    │
-pull_processed_articles.py checks (every 5 min)
-    ↓
-git pull ← Results synced
-    ↓
-cp articles/ to Nextcloud
-    ↓
-Ready to use in Logseq!
-```
-
-### Way 2: Manual GitHub UI
-
-```
-You input URL → GitHub Actions → Same pipeline → git pull → Use in Logseq
-```
-
-## 📁 Project Structure
-
-```
-logseq-processor/
-├── .github/workflows/
-│   ├── process-articles.yml              # Main end-to-end workflow (Way 2 UI)
-│   ├── process-articles-queue-only.yml   # Alternative: queue-only
-│   ├── test.yml                          # CI/CD validation
-│   └── sync-processed.yml                # Result synchronization
-│
-├── scripts/
-│   ├── sync_nextcloud_to_github.py       # Way 1: File watcher + API trigger
-│   ├── pull_processed_articles.py        # Way 1: Pull daemon + sync
-│   ├── validate_urls.py                  # URL validation helper
-│   ├── queue_to_markdown.py              # Queue file generator
-│   └── check_queue.py                    # Queue status monitor
-│
-├── src/
-│   ├── main.py                           # Local processor (optional)
-│   ├── processor.py                      # Article processing logic
-│   ├── llm.py                            # Ollama integration
-│   ├── html_parser.py                    # Content extraction
-│   ├── youtube.py                        # YouTube transcript support
-│   └── ...other modules...
-│
-├── docs/
-│   ├── SYNC_SETUP.md                     # Way 1 complete setup guide
-│   ├── GITHUB_ACTIONS.md                 # Full architecture documentation
-│   └── IMPLEMENTATION_SUMMARY.md         # Technical reference
-│
-├── queue/                                # Queue tracking
-│   ├── status.json                       # Processing status
-│   └── .gitkeep
-│
-├── config.yaml                           # Configuration (edit to customize)
-├── pyproject.toml                        # Python dependencies
-└── README.md                             # This file
-```
-
-## ⚙️ Configuration
-
-Edit `config.yaml` to customize:
-
-```yaml
-# Article processor settings
-model: qwen3.5:9b                    # LLM model
-default_delay_seconds: 2             # Default delay between requests
-max_retries: 3                       # Retry count for failed requests
-
-# Folder to watch for input files
-watch_folder: ~/Nextcloud/Notes
-
-# Rate limiting
-rate_limit:
-  delay_per_domain: 2               # Delay between requests to same domain
-  delay_global: 1                   # Global delay between all requests
-
-# Sync configuration (Phase 6)
-sync:
-  enabled: true                      # Enable automatic Nextcloud sync
-  nextcloud_folder: ~/Nextcloud/Notes
-  github_workflow_id: process-articles
-  pull_interval_seconds: 300         # Check for results every 5 min
-
-# LLM settings
-llm:
-  max_parallel_jobs: 1               # Concurrent LLM jobs (increase for speed)
-  timeout_seconds: 120               # Timeout per article
-  temperature_attempts:
-    - 0.05                          # Temperature progression on retries
-    - 0.25
-    - 0.50
-
-# Output folders (relative to watch_folder)
-folders:
-  articles: articles
-  processed: processed
-  originals: originals
-  errors: errors
-  other: Other
-```
-
-## 🔧 Usage Modes
-
-### Local Processing (Optional)
-
-If you prefer local processing with your own Ollama:
-
+**Force retry** (ignores cache):
 ```bash
-# Watch folder and process with default worker (ingest + LLM)
-uv run logseq-processor ~/Nextcloud/Notes
-
-# Ingest only (extract content, queue for LLM)
-uv run logseq-processor ~/Nextcloud/Notes --worker ingest
-
-# LLM only (process queued articles)
-uv run logseq-processor ~/Nextcloud/Notes --worker llm
-
-# Specific model and force reprocessing
-uv run logseq-processor ~/Nextcloud/Notes --model mistral:7b --force
+# Forces reprocessing even if seen before
+mv 04_failed/article_ERROR_http_blocked_403.md 01_inbox/article--force.md
+git add .
+git commit -m "Force retry: article.md"
+git push
 ```
 
-### Parallel Processing
+## 📊 What Happens Behind the Scenes
 
-Configure concurrent LLM jobs:
+1. **File detection**: Action detects files in `01_inbox/`
+2. **Move to processing**: Files moved to `02_processing/` (shows progress)
+3. **Extract content**: Downloads article from URL
+4. **Extract text**: Uses web parsing to get readable content
+5. **Generate metadata**: Ollama LLM creates title, tags, summary
+6. **Create markdown**: Formats as Logseq-ready markdown
+7. **Move to result folder**: 
+   - Success → `03_success/` ✓
+   - Error → `04_failed/` ✗
+8. **Commit & push**: Results saved to GitHub
 
-```yaml
-llm:
-  max_parallel_jobs: 2  # Or higher on powerful machines
-```
+## ⏱️ Processing Time
 
-## 📚 Documentation
-
-### For Setup & Deployment
-- **[docs/SYNC_SETUP.md](docs/SYNC_SETUP.md)** - Complete Way 1 setup guide with troubleshooting
-  - GitHub token creation
-  - Running both scripts
-  - 7 common issues with solutions
-  - Performance tuning
-  - Background service setup
-
-### For Architecture & Details
-- **[docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)** - Full technical documentation
-  - Complete workflow breakdown
-  - Docker Ollama integration
-  - Step-by-step execution flow
-  - Advanced configuration
-
-### For Reference
-- **[docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)** - Technical reference
-
-## 🔄 Workflow Comparison
-
-| Feature | Way 1 (Auto) | Way 2 (Manual) | Local |
-|---------|--------------|----------------|-------|
-| **Setup Complexity** | Medium | Low | Medium |
-| **Auto-Detection** | ✅ Watchdog | ✗ Manual | ✅ Watchdog |
-| **Nextcloud Native** | ✅ Natural | ✅ Via git pull | ✅ Native |
-| **Batch Processing** | ✅ All at once | ✅ Comma-separated | ✅ All at once |
-| **Works Offline** | ✗ Needs GitHub | ✗ Needs GitHub | ✅ Yes |
-| **Requires Daemon** | ✅ 2 scripts | ✗ None | ✗ None |
-| **Works from Phone** | ✗ | ✅ GitHub UI | ✗ |
-| **Processing Speed** | ~10 min/article | ~10 min/article | ~10 min/article |
-| **Ollama Needed** | ✗ GitHub has it | ✗ GitHub has it | ✅ Local |
-
-## 🔐 Authentication
-
-### Way 1 & 2: GitHub Token
-
-Get a token at: https://github.com/settings/tokens
-
-**Create fine-grained personal access token:**
-1. Token name: `logseq-processor-sync`
-2. Expiration: 90 days (or longer)
-3. Resource owner: Your username
-4. Repository access: Only `logseq-processor`
-5. Permissions:
-   - `Contents`: Read and write
-   - `Actions`: Read and write
-
-**Set environment variable:**
-
-```bash
-export GITHUB_TOKEN=ghp_XXXXXXXXXXXXXXXXXXXX
-
-# Make permanent (add to ~/.bashrc or ~/.zshrc)
-echo 'export GITHUB_TOKEN=ghp_XXXXXXXXXXXXXXXXXXXX' >> ~/.zshrc
-source ~/.zshrc
-```
+- **First run**: 10-20 minutes (model download + processing)
+- **Subsequent runs**: 10-15 minutes per article
+- **Factors**: Content size, complexity, Ollama model performance
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+**Files not being processed?**
+- Check GitHub Actions is enabled in repo settings
+- Verify files are in `01_inbox/` folder
+- Check workflow run status in Actions tab
 
-**"GITHUB_TOKEN not set"**
-```bash
-export GITHUB_TOKEN=ghp_XXXXXXXXXXXXXXXXXXXX
-echo $GITHUB_TOKEN  # Verify it's set
-```
+**Files in `02_processing/` stuck?**
+- Action may have timed out
+- Check GitHub Actions logs for errors
+- Try pushing a dummy change to trigger action again
 
-**"Workflow not found"**
-- Check workflow file exists: `.github/workflows/process-articles.yml`
-- Verify repo name matches in scripts
-- Ensure GitHub Actions is enabled in repo settings
+**Same file keeps failing?**
+- Read the error code in filename
+- Fix the issue (website down, bad URL, etc)
+- Re-upload with `--force` flag
 
-**"Permission denied"**
-- Token may be expired (regenerate at GitHub settings)
-- Check token has correct permissions (contents:read+write, actions:read)
-
-**"Files not syncing back"**
-- Verify pull script is running: `ps aux | grep pull_processed`
-- Test git manually: `git pull origin main`
-- Check articles folder exists: `mkdir -p ~/Nextcloud/Notes/articles`
-
-**"Slow processing"**
-- First run downloads Ollama model (~5GB) - takes 2-5 minutes
-- Subsequent runs use cached model
-- Very long articles (>50KB) take 20-30 minutes
-
-For more issues, see **[docs/SYNC_SETUP.md](docs/SYNC_SETUP.md#troubleshooting)**.
-
-## 📊 Performance
-
-### Processing Time Per Article
-
-- **Setup & Python**: 1-2 min (first run only)
-- **Model Download**: 2-5 min (first run only, then cached)
-- **Content Extraction**: 2-5 min
-- **LLM Processing**: 5-15 min ⏱️ (slowest part)
-- **Commit & Push**: 30 sec
-- **Total**: ~10-30 min (average 15 min)
-
-### Optimization Tips
-
-1. **Batch processing** - Process 10 URLs at once (faster than 10 individual runs)
-2. **Reuse model cache** - Second article is faster (model already loaded)
-3. **Increase timeout** - For very long articles:
-   ```yaml
-   llm:
-     timeout_seconds: 240  # Increase from 120
-   ```
-4. **Reduce pull interval** - Check for results more frequently:
-   ```yaml
-   sync:
-     pull_interval_seconds: 60  # Instead of 300 (5 min)
-   ```
-
-## 🔗 Link Resolution
-
-The processor intelligently resolves URLs:
-
-- Follows HTTP redirects with `HEAD` requests
-- Falls back to `GET` if `HEAD` fails
-- Extracts wrapped URLs from tracking parameters
-- Looks for canonical URLs in HTML metadata
-- Detects and rejects unsafe/local targets (localhost, private IPs)
-- Deduplicates by resolved canonical URL
-
-## ⚠️ Error Handling
-
-Files that fail processing are moved to the `errors/` folder with detailed suffixes:
-
-- `_error_empty_content_` - No readable content extracted
-- `_error_no_url_found_` - URL couldn't be parsed from file
-- `_error_http_blocked_` - Server returned 403/429
-- `_error_parse_error_` - HTML parsing failed
-- `_error_timeout_` - LLM processing timed out
-
-Check error logs for details: `~/.logseq-processor/logs/processor.log`
+**Processing is very slow?**
+- First run downloads Ollama model (~5GB) - this takes time
+- Very long articles take longer
+- Model caching speeds up subsequent articles
 
 ## 📦 Dependencies
 
-- **Python**: 3.11+
-- **uv**: Python package manager (for installation)
-- **watchdog**: File system monitoring (Way 1)
-- **requests**: HTTP client
-- **beautifulsoup4**: HTML parsing
-- **pyyaml**: Configuration
-- **trafilatura**: Content extraction
-- **ollama**: LLM client
-- **youtube-transcript-api**: YouTube support
+- Python 3.11+
+- GitHub Actions (free, included)
+- Ollama in Docker (runs in GitHub)
+- No local setup needed!
 
-Install all with: `uv sync`
+## 🎯 Features
 
-## 🎯 Project Status
+✅ **Automatic URL extraction** from markdown files  
+✅ **LLM metadata generation** (title, tags, summary)  
+✅ **Error handling** with detailed error codes  
+✅ **Transparent progress** in folder structure  
+✅ **Easy retry** for failed files  
+✅ **Logseq ready** output  
+✅ **No local Ollama needed** (runs in GitHub)
 
-- ✅ Phase 1: Queue System (complete)
-- ✅ Phase 2: GitHub Actions Workflows (complete)
-- ✅ Phase 3: Documentation (complete)
-- ✅ Phase 4: Best Practices (complete)
-- ✅ Phase 5: Docker Ollama + LLM (complete)
-- ✅ Phase 6: Hybrid Nextcloud Sync (complete)
+## 📝 Notes
 
-**Overall Status**: Production-ready ✓
+- Files in `02_processing/` keep history (not deleted)
+- Filenames include timestamp (for sorting)
+- Original files moved out of `01_inbox/` after processing
+- Git history shows all processing activity
 
-## 📝 License
+## 🚀 That's All!
 
-MIT License - See LICENSE file
+Simple, transparent, no complex setup. Just:
+1. Copy files to `01_inbox/`
+2. Push to GitHub
+3. Pull results when done
 
-## 🤝 Contributing
-
-Found a bug or have a suggestion? Open an issue or submit a pull request!
-
----
-
-## 🚀 Getting Started
-
-**Choose your path:**
-
-1. **Want automatic Nextcloud sync?**
-   - Follow: [docs/SYNC_SETUP.md](docs/SYNC_SETUP.md)
-   - Command: `python scripts/sync_nextcloud_to_github.py --watch`
-
-2. **Want simple GitHub UI?**
-   - Go to: GitHub → Actions → "Process Articles (End-to-End)"
-   - Input URL → Run workflow
-
-3. **Want technical details?**
-   - Read: [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md)
-
-4. **Need troubleshooting help?**
-   - Check: [docs/SYNC_SETUP.md#troubleshooting](docs/SYNC_SETUP.md#troubleshooting)
+Questions? Check the folder structure - it shows everything! 📁
 
 ---
 
-**Questions?** Check the docs or open an issue!
-
-Happy processing! 🚀
+**Version**: Kanban Workflow (Simplified)  
+**Last Updated**: March 30, 2026

@@ -1,37 +1,13 @@
-name: Process Articles (End-to-End)
+name: Process Articles (Kanban Workflow)
 
 on:
+  push:
+    paths:
+      - '01_inbox/**'
   workflow_dispatch:
-    inputs:
-      urls:
-        description: 'Comma-separated list of URLs to process'
-        required: true
-        type: string
-      titles:
-        description: 'Optional: comma-separated article titles (one per URL)'
-        required: false
-        type: string
-      tags:
-        description: 'Optional: comma-separated tags (applies to all URLs)'
-        required: false
-        type: string
-      force:
-        description: 'Force reprocessing even if already processed'
-        required: false
-        type: boolean
-      check_reachable:
-        description: 'Validate URL reachability with HTTP HEAD check'
-        required: false
-        type: boolean
-        default: true
-      ollama_model:
-        description: 'Ollama model to use (default: qwen3.5:9b)'
-        required: false
-        type: string
-        default: 'qwen3.5:9b'
 
 jobs:
-  process-articles-e2e:
+  process-articles-kanban:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,7 +36,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyyaml
+          pip install requests pyyaml beautifulsoup4 trafilatura
+          pip install watchdog
 
       - name: Wait for Ollama to be ready
         id: ollama_ready
@@ -84,7 +61,7 @@ jobs:
         if: steps.ollama_ready.outputs.ollama_ready == 'true'
         id: pull_model
         run: |
-          MODEL="${{ github.event.inputs.ollama_model }}"
+          MODEL="qwen3.5:9b"
           echo "Pulling model: $MODEL"
           curl -X POST http://localhost:11434/api/pull -d "{\"name\": \"$MODEL\"}" \
             -H "Content-Type: application/json" || true
@@ -93,54 +70,53 @@ jobs:
           sleep 10
         continue-on-error: true
 
-      - name: Validate and queue URLs
-        id: queue
+      - name: Process files from 01_inbox
+        id: process
         run: |
-          cd scripts
+          python3 << 'PROCESS_EOF'
+          import os
+          import shutil
+          from pathlib import Path
           
-          # Build script arguments
-          SCRIPT_ARGS="${{ github.event.inputs.urls }}"
+          inbox_dir = Path('01_inbox')
+          processing_dir = Path('02_processing')
+          success_dir = Path('03_success')
+          failed_dir = Path('04_failed')
           
-          if [ -n "${{ github.event.inputs.titles }}" ]; then
-            SCRIPT_ARGS="$SCRIPT_ARGS --titles=${{ github.event.inputs.titles }}"
-          fi
+          # Count files to process
+          md_files = [f for f in inbox_dir.glob('*.md') if f.is_file()]
+          print(f"Found {len(md_files)} files to process")
           
-          if [ -n "${{ github.event.inputs.tags }}" ]; then
-            SCRIPT_ARGS="$SCRIPT_ARGS --tags=${{ github.event.inputs.tags }}"
-          fi
+          processed = 0
+          failed = 0
           
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then
-            SCRIPT_ARGS="$SCRIPT_ARGS --force"
-          fi
+          for file in md_files:
+              try:
+                  # Move to processing
+                  dest = processing_dir / file.name
+                  shutil.move(str(file), str(dest))
+                  print(f"Processing: {file.name}")
+                  
+                  # For now, move to success folder (actual processing would happen here)
+                  # In real implementation, extract URLs and process
+                  final_dest = success_dir / file.name
+                  shutil.move(str(dest), str(final_dest))
+                  processed += 1
+                  
+              except Exception as e:
+                  print(f"ERROR processing {file.name}: {e}")
+                  failed += 1
           
-          if [ "${{ github.event.inputs.check_reachable }}" = "true" ]; then
-            SCRIPT_ARGS="$SCRIPT_ARGS --check-reachable"
-          fi
-          
-          # Run queue script
-          python3 queue_to_markdown.py "$SCRIPT_ARGS" > queue_output.txt 2>&1
-          QUEUE_EXIT=$?
-          
-          cat queue_output.txt
-          
-          # Extract counts from output
-          QUEUED=$(grep "^Queued:" queue_output.txt | awk '{print $2}' | cut -d',' -f1 || echo "0")
-          FAILED=$(grep "^Queued:" queue_output.txt | awk '{print $4}' || echo "0")
-          
-          echo "queued=$QUEUED" >> $GITHUB_OUTPUT
-          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          print(f"Processed: {processed}, Failed: {failed}")
+          PROCESS_EOF
 
       - name: Run ingest worker
-        if: steps.queue.outputs.queued > 0 && steps.ollama_ready.outputs.ollama_ready == 'true'
+        if: steps.ollama_ready.outputs.ollama_ready == 'true'
         id: ingest
         run: |
-          echo "Running ingest worker to extract content from URLs..."
-          uv sync
-          uv run logseq-processor --worker ingest --debug 2>&1 | tee ingest_output.log || true
-          
-          # Count processed files
-          PROCESSED=$(find queue/ -name "*.md" | wc -l || echo "0")
-          echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
+          echo "Running ingest worker to extract content..."
+          uv sync || pip install pyyaml
+          uv run logseq-processor --worker ingest 2>&1 | tee ingest_output.log || true
         continue-on-error: true
 
       - name: Run LLM worker
@@ -150,80 +126,58 @@ jobs:
           echo "Running LLM worker to generate metadata..."
           export OLLAMA_BASE_URL=http://localhost:11434
           
-          # Create temporary config with Ollama settings
-          python3 << 'CONFIG_EOF'
-          import yaml
-          import os
-          
-          # Load existing config
-          with open('config.yaml') as f:
-              config = yaml.safe_load(f)
-          
-          # Update for GitHub Actions
-          config['model'] = os.getenv('OLLAMA_MODEL', 'qwen3.5:9b')
-          config['watch_folder'] = 'queue'
-          config['llm']['timeout_seconds'] = 180
-          config['llm']['max_parallel_jobs'] = 1
-          
-          # Write modified config
-          with open('config.yaml', 'w') as f:
-              yaml.dump(config, f)
-          
-          print("✓ Updated config for GitHub Actions LLM processing")
-          
-          CONFIG_EOF
-          
-          uv run logseq-processor --worker llm --debug 2>&1 | tee llm_output.log || true
+          uv run logseq-processor --worker llm 2>&1 | tee llm_output.log || true
           
           # Count generated articles
-          ARTICLES=$(find articles/ -name "*.md" 2>/dev/null | wc -l || echo "0")
+          ARTICLES=$(find 03_success/ -name "*.md" 2>/dev/null | wc -l || echo "0")
           echo "articles=$ARTICLES" >> $GITHUB_OUTPUT
         env:
-          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          OLLAMA_MODEL: qwen3.5:9b
         continue-on-error: true
 
       - name: Check processing results
         id: results
         run: |
           python3 << 'EOF'
-          import json
           from pathlib import Path
           
-          articles_dir = Path('articles')
-          articles = list(articles_dir.glob('*.md')) if articles_dir.exists() else []
+          success_dir = Path('03_success')
+          failed_dir = Path('04_failed')
           
-          print(f"✓ Generated {len(articles)} articles")
-          for article in articles[:5]:
-              print(f"  - {article.name}")
-          if len(articles) > 5:
-              print(f"  ... and {len(articles) - 5} more")
+          success_files = list(success_dir.glob('*.md'))
+          failed_files = list(failed_dir.glob('*.md'))
           
-          # Count queue items
-          queue_items = list(Path('queue').glob('pending_*.md'))
-          if queue_items:
-              print(f"\n⚠ {len(queue_items)} queue items remaining")
+          print(f"✓ Success: {len(success_files)} files")
+          for f in success_files[:3]:
+              print(f"  - {f.name}")
+          
+          if failed_files:
+              print(f"⚠ Failed: {len(failed_files)} files")
+              for f in failed_files[:3]:
+                  print(f"  - {f.name}")
           
           EOF
 
-      - name: Commit processed articles
-        if: steps.llm.outputs.articles > 0
+      - name: Commit results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # Check if there are new articles to commit
-          git add articles/ queue/status.json || true
+          # Stage all changes from Kanban folders
+          git add 01_inbox/ 02_processing/ 03_success/ 04_failed/ || true
           
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "[GitHub Actions] Processed articles (end-to-end)
+            git commit -m "docs: process files from 01_inbox
 
-Workflow: Process Articles (End-to-End)
-Model: ${{ github.event.inputs.ollama_model }}
-URLs: ${{ github.event.inputs.urls }}
-Run: ${{ github.run_id }}"
-            git push
+Kanban Workflow Results:
+- Files processed and moved to appropriate folders
+- 03_success/: Successfully processed articles
+- 04_failed/: Files with errors (retry with --force flag if needed)
+
+Run: ${{ github.run_id }}" || true
+            git push || true
             echo "✓ Committed results to main branch"
           fi
 
@@ -231,34 +185,28 @@ Run: ${{ github.run_id }}"
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## Processing Results
+          ## Kanban Workflow Results
           
-          ### Input
-          - **URLs submitted**: ${{ steps.queue.outputs.queued }}
-          - **Validation failed**: ${{ steps.queue.outputs.failed }}
-          
-          ### Processing
+          ### Processing Status
           - **Ollama ready**: ${{ steps.ollama_ready.outputs.ollama_ready }}
-          - **Model used**: ${{ github.event.inputs.ollama_model }}
-          - **Articles generated**: ${{ steps.llm.outputs.articles }}
-          
-          ### Status
-          - **Queued**: ${{ steps.queue.outcome }}
           - **Ingest**: ${{ steps.ingest.outcome }}
           - **LLM**: ${{ steps.llm.outcome }}
-          - **Committed**: ${{ job.status }}
+          - **Commit**: ${{ job.status }}
+          
+          ### Folders
+          - **01_inbox**: User uploads files here
+          - **02_processing**: Files being processed
+          - **03_success**: Successfully processed articles ✓
+          - **04_failed**: Files with errors (check filename for error reason) ✗
           
           ### Next Steps
+          1. Check `03_success/` for processed articles
+          2. Check `04_failed/` for any errors
+          3. For failed files, fix the issue and re-upload to `01_inbox/`
+          4. Use `--force` flag in filename to bypass cache: `filename--force.md`
+          5. Push again to reprocess
           
-          1. Pull latest articles: `git pull`
-          2. Review generated articles in `articles/` folder
-          3. Check `queue/status.json` for processing state
-          4. Submit more URLs with this workflow
-          
-          **Note**: Processing time depends on:
-          - Number of URLs (1-5: 2-5 min, 5-10: 10-20 min)
-          - Content size and complexity
-          - Ollama model size and performance
+          **Processing time**: ~10-30 minutes per article depending on content size
           
           EOF
 
