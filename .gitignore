@@ -207,3 +207,23 @@ marimo/_lsp/
 __marimo__/
 *.pyc
 .venv/
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Logseq specific
+.logseq/
