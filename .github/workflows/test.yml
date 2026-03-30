@@ -81,7 +81,7 @@ jobs:
 
       - name: Validate dependencies
         run: |
-          python3 << 'EOF'
+          uv run python << 'EOF'
           import sys
           
           required_packages = [
@@ -118,11 +118,11 @@ jobs:
           
           # Test validate_urls
           echo "Testing validate_urls.py..."
-          python3 validate_urls.py "https://example.com" "invalid url" 2>&1 | grep -q "Valid: 1" && echo "✓ validate_urls works" || exit 1
+          uv run python validate_urls.py "https://example.com" "invalid url" 2>&1 | grep -q "Valid: 1" && echo "✓ validate_urls works" || exit 1
           
           # Test queue_to_markdown
           echo "Testing queue_to_markdown.py..."
-          python3 queue_to_markdown.py "https://example.com" --tags="test" 2>&1 | grep -q "Queued: 1" && echo "✓ queue_to_markdown works" || exit 1
+          uv run python queue_to_markdown.py "https://example.com" --tags="test" 2>&1 | grep -q "Queued: 1" && echo "✓ queue_to_markdown works" || exit 1
           
           # Clean up test queue
           cd ..
@@ -144,7 +144,7 @@ jobs:
 
       - name: Lint check (optional)
         run: |
-          python3 -m py_compile src/*.py scripts/*.py 2>&1 | grep -q "error" && exit 1 || exit 0
+          uv run python -m py_compile src/*.py scripts/*.py 2>&1 | grep -q "error" && exit 1 || exit 0
         continue-on-error: true
 
       - name: Job summary
