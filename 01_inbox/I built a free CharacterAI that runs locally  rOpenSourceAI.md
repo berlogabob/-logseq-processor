@@ -1,0 +1,1 @@
+[I built a free CharacterAI that runs locally : r/OpenSourceAI](https://www.reddit.com/)

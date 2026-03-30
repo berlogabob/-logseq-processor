@@ -1,0 +1,1 @@
+[I gave up on Kindle and built my own eBook server with Calibre](https://www.howtogeek.com/i-gave-up-on-kindle-and-built-an-ebook-server-with-calibre/)

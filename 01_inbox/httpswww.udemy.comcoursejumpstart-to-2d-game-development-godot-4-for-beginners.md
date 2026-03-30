@@ -1,0 +1,1 @@
+[https://www.udemy.com/course/jumpstart-to-2d-game-development-godot-4-for-beginners/](https://rutracker.me/forum/out.php?url=https%3A%2F%2Fwww.udemy.com%2Fcourse%2Fjumpstart-to-2d-game-development-godot-4-for-beginners%2F&p=87947215&t=6713717&f=1565&u=45037745)
