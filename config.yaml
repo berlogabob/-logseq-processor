@@ -38,3 +38,18 @@ logging:
   retention_days: 7
   console: true
   queue_heartbeat_seconds: 10
+
+# ================================
+# GitHub Actions Integration Notes
+# ================================
+# When using GitHub Actions:
+#
+# 1. URLs are submitted via the "Process Articles" workflow
+# 2. Queue files are created in queue/ folder with metadata
+# 3. Local worker runs: uv run logseq-processor --worker ingest
+#    to pull from queue and extract content
+# 4. Local worker runs: uv run logseq-processor --worker llm
+#    to process extracted content with LLM
+# 5. Results are committed back and synced to GitHub
+#
+# See docs/GITHUB_ACTIONS.md for full setup instructions

@@ -1,6 +1,8 @@
 # Logseq Processor
 
-Logseq article processor with tabs support, URL normalization, and rate limiting.
+[![Tests](https://github.com/YOUR_USERNAME/logseq-processor/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/logseq-processor/actions/workflows/test.yml)
+
+Logseq article processor with tabs support, URL normalization, and rate limiting. Now with **GitHub Actions integration** for remote URL submission.
 
 ## Features
 
@@ -59,6 +61,49 @@ logging:
 ## Configuration
 
 Edit `config.yaml` to customize settings.
+
+## GitHub Actions Integration
+
+Submit articles for processing via GitHub Actions without needing to run the processor locally:
+
+### Quick Start
+
+1. **Submit URLs** via GitHub → Actions → "Process Articles" workflow
+   - Input comma-separated URLs
+   - Optionally add titles and tags
+   - Workflow validates and queues articles
+
+2. **Run Local Worker** (where Ollama is available)
+   ```bash
+   git pull
+   uv run logseq-processor --worker ingest
+   uv run logseq-processor --worker llm
+   ```
+
+3. **Sync Results** back to GitHub (optional)
+   - Use "Sync Processed Files" workflow, or
+   - Manually: `git add articles/ queue/ && git commit && git push`
+
+**See [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md) for full setup guide.**
+
+### Architecture
+
+```
+GitHub Actions (Queue URLs)
+    ↓
+Local Worker (Ingest + LLM processing)
+    ↓
+GitHub (Sync Results)
+```
+
+Key files:
+- `.github/workflows/process-articles.yml` - Submit URLs
+- `.github/workflows/test.yml` - Run validation tests
+- `.github/workflows/sync-processed.yml` - Pull results back
+- `queue/status.json` - Track processing state
+- `scripts/validate_urls.py` - URL validation utility
+- `scripts/queue_to_markdown.py` - Queue generation
+- `scripts/check_queue.py` - Monitor queue status
 
 ## Link resolution behavior
 

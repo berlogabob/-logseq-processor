@@ -1,0 +1,12 @@
+{
+  "queued": [],
+  "processing": [],
+  "done": [],
+  "error": [],
+  "last_update": null,
+  "stats": {
+    "total_queued": 0,
+    "total_processed": 0,
+    "total_errors": 0
+  }
+}

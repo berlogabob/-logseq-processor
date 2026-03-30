@@ -1,0 +1,243 @@
+name: Process Articles
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Comma-separated list of URLs to process'
+        required: true
+        type: string
+      titles:
+        description: 'Optional: comma-separated article titles (one per URL)'
+        required: false
+        type: string
+      tags:
+        description: 'Optional: comma-separated tags (applies to all URLs)'
+        required: false
+        type: string
+      force:
+        description: 'Force reprocessing even if already processed'
+        required: false
+        type: boolean
+      check_reachable:
+        description: 'Validate URL reachability with HTTP HEAD check'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  queue-urls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pyyaml
+
+      - name: Deduplicate URLs
+        id: dedupe
+        run: |
+          python3 << 'EOF'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlparse
+          
+          urls_input = "${{ github.event.inputs.urls }}"
+          urls = [u.strip() for u in urls_input.split(',')]
+          
+          # Remove duplicates (case-insensitive)
+          seen = set()
+          unique_urls = []
+          for url in urls:
+              normalized = url.lower().strip()
+              if normalized not in seen:
+                  seen.add(normalized)
+                  unique_urls.append(url)
+          
+          print(f"Input: {len(urls)} URLs, Deduplicated: {len(unique_urls)} URLs")
+          
+          if len(urls) != len(unique_urls):
+              print(f"  Removed {len(urls) - len(unique_urls)} duplicate(s)")
+          
+          # Check for already processed URLs
+          articles_dir = Path('articles')
+          if articles_dir.exists():
+              article_files = list(articles_dir.glob('*.md'))
+              
+              # Extract URLs from articles
+              processed_urls = set()
+              for article in article_files:
+                  try:
+                      content = article.read_text()
+                      for line in content.split('\n'):
+                          if line.startswith('url:: '):
+                              proc_url = line.replace('url:: ', '').strip().lower()
+                              processed_urls.add(proc_url)
+                  except:
+                      pass
+              
+              # Filter out already processed
+              already_processed = [u for u in unique_urls if u.lower() in processed_urls]
+              if already_processed:
+                  print(f"\n  ⚠ Already processed ({len(already_processed)}):")
+                  for u in already_processed[:5]:
+                      print(f"    - {u}")
+                  if len(already_processed) > 5:
+                      print(f"    ... and {len(already_processed) - 5} more")
+              
+              # Filter unless --force
+              if "${{ github.event.inputs.force }}" != "true":
+                  unique_urls = [u for u in unique_urls if u.lower() not in processed_urls]
+                  print(f"\n  Filtered to {len(unique_urls)} unprocessed URLs (use force=true to reprocess)")
+          
+          # Save for next step
+          print("\n::group::URLs to queue")
+          for u in unique_urls:
+              print(f"  {u}")
+          print("::endgroup::")
+          
+          # Pass to next step
+          print(f"\nURLS_TO_QUEUE={','.join(unique_urls)}" >> os.environ.get('GITHUB_ENV', '/dev/null'))
+          
+          import os
+          env_file = os.getenv('GITHUB_ENV')
+          if env_file:
+              with open(env_file, 'a') as f:
+                  f.write(f"URLS_TO_QUEUE={','.join(unique_urls)}\n")
+          
+          EOF
+
+      - name: Validate and queue URLs
+        id: queue
+        run: |
+          cd scripts
+          
+          # Build script arguments
+          SCRIPT_ARGS="${{ github.event.inputs.urls }}"
+          
+          if [ -n "${{ github.event.inputs.titles }}" ]; then
+            SCRIPT_ARGS="$SCRIPT_ARGS --titles=${{ github.event.inputs.titles }}"
+          fi
+          
+          if [ -n "${{ github.event.inputs.tags }}" ]; then
+            SCRIPT_ARGS="$SCRIPT_ARGS --tags=${{ github.event.inputs.tags }}"
+          fi
+          
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            SCRIPT_ARGS="$SCRIPT_ARGS --force"
+          fi
+          
+          if [ "${{ github.event.inputs.check_reachable }}" = "true" ]; then
+            SCRIPT_ARGS="$SCRIPT_ARGS --check-reachable"
+          fi
+          
+          # Run queue script
+          python3 queue_to_markdown.py "$SCRIPT_ARGS" > queue_output.txt 2>&1
+          QUEUE_EXIT=$?
+          
+          cat queue_output.txt
+          
+          # Extract counts from output
+          QUEUED=$(grep "^Queued:" queue_output.txt | awk '{print $2}' | cut -d',' -f1 || echo "0")
+          FAILED=$(grep "^Queued:" queue_output.txt | awk '{print $4}' || echo "0")
+          
+          echo "queued=$QUEUED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "exit_code=$QUEUE_EXIT" >> $GITHUB_OUTPUT
+
+      - name: Update queue status
+        id: status
+        run: |
+          python3 << 'EOF'
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+          
+          status_file = Path('../queue/status.json')
+          status = json.loads(status_file.read_text())
+          
+          # Count pending items
+          pending_count = len(status.get('queued', []))
+          total_queued = status['stats'].get('total_queued', 0)
+          
+          print(f"Queue Status:")
+          print(f"  Total queued so far: {total_queued}")
+          print(f"  Currently pending: {pending_count}")
+          
+          EOF
+        working-directory: scripts
+
+      - name: Create commit message
+        id: commit
+        run: |
+          QUEUED=${{ steps.queue.outputs.queued }}
+          FAILED=${{ steps.queue.outputs.failed }}
+          
+          if [ "$FAILED" = "0" ]; then
+            MSG="[GitHub Actions] Queue batch: $QUEUED URLs queued"
+          else
+            MSG="[GitHub Actions] Queue batch: $QUEUED URLs queued, $FAILED invalid/unreachable"
+          fi
+          
+          echo "message=$MSG" >> $GITHUB_OUTPUT
+          echo "Summary: $MSG" >> $GITHUB_STEP_SUMMARY
+
+      - name: Commit and push
+        if: steps.queue.outputs.queued > 0
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add queue/
+          git commit -m "${{ steps.commit.outputs.message }}" \
+            -m "Workflow run: ${{ github.run_id }}" \
+            -m "User: ${{ github.actor }}"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## Queue Results
+          
+          - **Queued**: ${{ steps.queue.outputs.queued }} URLs
+          - **Failed**: ${{ steps.queue.outputs.failed }} URLs
+          
+          ### Next Steps
+          
+          1. Wait for the local worker to process queued items
+          2. Monitor progress with: `python scripts/check_queue.py`
+          3. Processed articles will appear in the `articles/` folder
+          4. Sync results back to GitHub using the "Sync Processed Files" workflow
+          
+          EOF
+          
+          if [ "${{ steps.queue.outputs.failed }}" != "0" ]; then
+            cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          
+          ⚠️ Some URLs failed validation. Check the logs above for details.
+          EOF
+          fi
+
+      - name: Report failure
+        if: failure() && steps.queue.outputs.exit_code != 0
+        run: |
+          echo "❌ Failed to queue articles. Check logs above for details."
+          exit 1
