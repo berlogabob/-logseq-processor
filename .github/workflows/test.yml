@@ -86,7 +86,7 @@ jobs:
           
           required_packages = [
               'trafilatura',
-              'beautifulsoup4',
+              'bs4',  # beautifulsoup4 package imports as bs4
               'ollama',
               'watchdog',
               'pydantic',
